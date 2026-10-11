@@ -67,7 +67,7 @@ Client                          Dongle (192.168.178.32)
   │◀─ UDP :8800 → … ───────────────────────────────────│
 ```
 
-**Wichtig:** Ohne den Keep-Alive-Thread bricht der Dongle den Stream nach dem ersten UDP-Block ab.
+**Wichtig:** Ohne den Keep-Alive-Thread bricht der Dongle den Stream nach ~20–30 s ab (WinError 10053).
 
 ---
 
@@ -75,25 +75,31 @@ Client                          Dongle (192.168.178.32)
 
 | Datei | Inhalt |
 |-------|--------|
-| `wisi_dongle.py` | Python-Client – Steuerung + UDP-Empfang + EPG-Abfrage |
-| `PCAPdroid_11_Okt._17_09_51[1].pcap` | Netzwerk-Mitschnitt (PCAPdroid) der Original-App |
-| `chatgpt-answer-for-analysis-the-protocol.md` | KI-gestützte Protokollanalyse des PCAP |
-| `chatgpt-deep-research-with-pacap.md` | Detailanalyse mit PCAP-Auswertung (Tuning, Keep-Alive, EPG) |
-| `chatgpt-deep-research-without-pacap.md` | Protokollanalyse ohne PCAP (DVB-Standards, Hypothesen) |
+| `wisi_dongle_client.py` | **Haupt-Client (empfohlen)** – Keep-Alive, Thread-Lock, EPG, CLI |
+| `wisi_dongle_v1.py` | Erster Client ohne Keep-Alive (zum Vergleich) |
+| `wisi_dongle_simple.py` | Minimaler Proof-of-Concept (kein Init, kein Drain) |
+| `capture_pcapdroid_2024-10-11.pcap` | Netzwerk-Mitschnitt (PCAPdroid) der Original-App |
+| `script_output_example.txt` | Beispiel-Ausgabe des Clients (zeigt Verbindungsabbruch ohne Keep-Alive) |
+| `protocol_analysis_chatgpt.md` | KI-gestützte Protokollanalyse des PCAP |
+| `deep_research_with_pcap.md` | Detailanalyse mit PCAP-Auswertung (Tuning, Keep-Alive, EPG) |
+| `deep_research_without_pcap.md` | Protokollanalyse ohne PCAP (DVB-Standards, Hypothesen) |
 
 ---
 
 ## Verwendung
 
 ```bash
-# Stream aufzeichnen
-python3 wisi_dongle.py --ip 192.168.178.32 --output kanal.ts
+# Stream aufzeichnen (empfohlen)
+python3 wisi_dongle_client.py --ip 192.168.178.32 --output kanal.ts
 
 # Mit EPG-Abfrage (prog_idx aus dem PCAP-XML)
-python3 wisi_dongle.py --ip 192.168.178.32 --epg-idx 0x40B7008F --output kanal.ts
+python3 wisi_dongle_client.py --ip 192.168.178.32 --epg-idx 0x40B7008F --output kanal.ts
+
+# Keep-Alive-Intervall anpassen (Standard: 250 ms)
+python3 wisi_dongle_client.py --ip 192.168.178.32 --keepalive 0.2
 
 # Debug-Ausgabe
-python3 wisi_dongle.py --ip 192.168.178.32 --debug
+python3 wisi_dongle_client.py --ip 192.168.178.32 --debug
 ```
 
 Die erzeugte `.ts`-Datei kann direkt mit **VLC** oder **ffplay** geöffnet werden:
