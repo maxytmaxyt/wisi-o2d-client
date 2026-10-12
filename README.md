@@ -4,32 +4,49 @@
 
 ---
 
-## Projekt-Roadmap
+## ▶ Schnellstart – Das ist die Datei die du benutzen sollst
 
-| Schritt | Datei | Status | Beschreibung |
-|---------|-------|--------|--------------|
-| **1** | `wisi_menu.py` | ✅ **Fertig** | Dongle-Verbindung prüfen + interaktives Hauptmenü |
-| **2** | `wisi_menu.py` | 🔲 In Arbeit | Kanalliste aus EPG laden, Kanal auswählen |
-| **3** | `wisi_menu.py` | 🔲 Geplant | Stream starten → VLC / ffplay per subprocess |
-| **4** | `wisi_menu.py` | 🔲 Geplant | Kanalwechsel (Tuning-Befehl erforschen) |
+```bash
+python3 src/wisi_menu.py --ip 192.168.178.32
+
+# Mit Debug-Ausgabe (zeigt alle Roh-Antworten des Dongles)
+python3 src/wisi_menu.py --ip 192.168.178.32 --debug
+```
+
+`src/wisi_menu.py` ist der **einzige aktive Client** – er wächst mit jedem Schritt der Roadmap.  
+Die Dateien in `archive/` sind alte Experimente und müssen nicht mehr angefasst werden.
 
 ---
 
-## Schritt 1 – Dongle-Verbindung + Hauptmenü
+## Ordnerstruktur
 
-```bash
-# Starten (Dongle muss im selben Netz sein)
-python3 wisi_menu.py --ip 192.168.178.32
-
-# Mit Debug-Ausgabe (zeigt alle Roh-Antworten des Dongles)
-python3 wisi_menu.py --ip 192.168.178.32 --debug
+```
+wisi-dongel/
+├── src/
+│   └── wisi_menu.py          ← HIER ARBEITEN – aktiver Client
+├── archive/
+│   ├── wisi_dongle_client.py  ← alte Version v4 (Referenz)
+│   ├── wisi_dongle_v1.py      ← alte Version v1 (Referenz)
+│   └── wisi_dongle_simple.py  ← minimaler Proof-of-Concept (Referenz)
+├── research/
+│   ├── deep_research_with_pcap.md       ← Protokollanalyse (wichtig!)
+│   ├── deep_research_without_pcap.md
+│   ├── protocol_analysis_chatgpt.md
+│   ├── script_output_example.txt        ← Beispiel-Ausgabe
+│   └── capture_pcapdroid_2024-10-11.pcap ← Original-PCAP-Mitschnitt
+└── README.md
 ```
 
-**Was passiert:**
-1. TCP-Connect auf Port 8802
-2. APIX 0x16 → Dongle muss mit 12 Byte antworten (Init/Status)
-3. APIX 0x17 → Dongle muss mit 4 Byte antworten (zweite Init-Phase)
-4. Bei Erfolg: Hauptmenü erscheint (Optionen 1–3 sind Platzhalter für Schritte 2–4)
+---
+
+## Projekt-Roadmap
+
+| Schritt | Status | Beschreibung |
+|---------|--------|--------------|
+| **1** | ✅ Fertig | Dongle verbinden + Init-Handshake + interaktives Hauptmenü |
+| **2** | 🔲 Geplant | Kanalliste aus EPG laden, Kanal auswählen |
+| **3** | 🔲 Geplant | Stream starten → VLC / ffplay per subprocess |
+| **4** | 🔲 Geplant | Kanalwechsel (Tuning-Befehl erforschen) |
 
 ---
 
@@ -62,11 +79,12 @@ UDP 8800   Datenpfad   – MPEG-TS-Blöcke (256 × 188 Byte pro Datagramm)
 | `0x31` | TCP      | EPG-XML abrufen |
 | `0x35` | TCP      | Ereignisbeschreibungsgröße abfragen |
 | `0x36` | TCP      | Ereignisbeschreibung abrufen |
-| `0x0A` | UDP      | Vorbereitungsschritt vor MPEG-TS-Stream |
+| `0x02` | UDP      | Pre-Init (einmalig vor 0x0A-Schleife) |
+| `0x0A` | UDP      | Vorbereitungsschleife vor MPEG-TS-Stream |
 | `0x01` | UDP      | MPEG-TS-Block anfordern (triggert UDP-Datagramm) |
-| `0xFF` | TCP      | Keep-Alive / Heartbeat (verhindert Stream-Abbruch) |
+| `0x16` | TCP (KA) | Keep-Alive alle 2,5 s (verhindert Stream-Abbruch) |
 
-### Protokoll-Ablauf (vollständig)
+### Protokoll-Ablauf
 
 ```
 Client                          Dongle (192.168.178.32)
@@ -80,34 +98,13 @@ Client                          Dongle (192.168.178.32)
   │── APIX 0x31 (EPG-XML) ──────────────────────────▶  │  ← Schritt 2
   │◀─ XML-Block (Kanalliste) ──────────────────────────│
   │── APIX 0x02 (Pre-Init UDP) ─────────────────────▶  │  ← Schritt 3
-  │── APIX 0x0A (Pre-Stream Loop) ──────────────────▶  │  ← Schritt 3
-  │                                                     │
+  │── APIX 0x0A (Pre-Stream Loop ~5 s) ─────────────▶  │  ← Schritt 3
   │ ┌─ Keep-Alive-Thread: APIX 0x16 alle 2,5 s ──────▶│  ← Schritt 3
-  │ └──────────────────────────────────────────────────┘
-  │                                                     │
   │── APIX 0x01 (Stream-Request via UDP) ───────────▶  │  ← Schritt 3
   │◀─ UDP :8800 → 256 MPEG-TS-Pakete (48 128 Byte) ────│
-  │── APIX 0x01 (wiederholt) ───────────────────────▶  │
-  │◀─ UDP :8800 → … ───────────────────────────────────│
 ```
 
-**Wichtig:** Ohne Keep-Alive bricht der Dongle den Stream nach ~20–30 s ab (WinError 10053).
-
----
-
-## Alle Dateien
-
-| Datei | Inhalt |
-|-------|--------|
-| `wisi_menu.py` | **Haupt-Client** – wächst mit jedem Schritt |
-| `wisi_dongle_client.py` | Alter Client v4 (PCAP-verified, Keep-Alive, EPG, CLI) |
-| `wisi_dongle_v1.py` | Erster Client ohne Keep-Alive (zum Vergleich) |
-| `wisi_dongle_simple.py` | Minimaler Proof-of-Concept |
-| `capture_pcapdroid_2024-10-11.pcap` | Netzwerk-Mitschnitt (PCAPdroid) der Original-App |
-| `script_output_example.txt` | Beispiel-Ausgabe (zeigt Verbindungsabbruch ohne Keep-Alive) |
-| `protocol_analysis_chatgpt.md` | KI-gestützte Protokollanalyse des PCAP |
-| `deep_research_with_pcap.md` | Detailanalyse mit PCAP-Auswertung |
-| `deep_research_without_pcap.md` | Protokollanalyse ohne PCAP |
+**Wichtig:** Ohne Keep-Alive bricht der Dongle den Stream nach ~20–30 s ab.
 
 ---
 
