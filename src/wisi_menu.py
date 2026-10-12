@@ -1,3 +1,8 @@
+# DEPRECATED – siehe src/wisi_client.py für die korrigierte Version
+# Bekannte Bugs: falsches _cmd_prepare-Payload, gemischtes USBS-Lesen,
+#                zu spätes UDP-Bind, hartcodierter pat_index
+# Diese Datei bleibt als Referenz erhalten.
+
 """
 WISI / Tivizen / TiViCon DVB-over-IP  –  Interaktiver Client
 =============================================================
