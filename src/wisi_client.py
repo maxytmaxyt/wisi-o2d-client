@@ -1,27 +1,19 @@
 """
-WISI / Tivizen / TiViCon DVB-over-IP  –  Client v2
+WISI / Tivizen / TiViCon DVB-over-IP  –  Client v3
 ====================================================
 
-Implementiert den vollständigen, aus PCAP verifizierten Ablauf:
+Protokoll-Referenz:
+  research/pcap_analysis.md         – Eigene PCAP-Analyse
+  research/deep_research_gemini.md  – Gemini Deep Research (icube Corp.)
 
-  Phase 1: TCP Init          (0x16 + 0x17)
-  Phase 2: EPG laden         (0x30/0x31 für alle Kanäle)
-  Phase 3: Kanal vorbereiten (0x03 + 0x32/0x33 + 0x02 Signal-Poll)
-  Phase 4: Tune              (0x01 → 0xF8/0x07 → UDP 0xF9/0x01 → 0x17)
-  Phase 5: Stream            (UDP 0xF9/0x01 Pull-Loop + TCP Keep-Alive)
-
-Protokoll-Referenz: research/pcap_analysis.md
-
-Fixes gegenüber wisi_menu.py:
-  - _cmd_prepare(): korrektes PCAP-Payload (0x00 0x00 0x00 0x02 + prog_idx)
-  - _recv_n(): liest USBS-Trailer (13 Byte) separat, kein gemischter exp_bytes
-  - stream(): UDP-Socket-Binding VOR connect() → kein Paketverlust mehr
-  - Channel.pat_index: Discovery über ch_Info statt hartcodierter Schätzung
-  - EPG-Loader: prog_idx-Discovery aus echten 0x30-Scans (nicht Hardcode-Liste)
-  - Signal-Poll: korrekter Byte-Offset (r[1]=Stärke, r[2]=Qualität nach USBS-Strip)
-  - Neue --scan-epg Flag: scannt alle bekannten prog_idx-Gruppen statt Demo-Liste
-  - Neue --duration in Sekunden auch über Menü setzbar
-  - Graceful shutdown: KeyboardInterrupt beendet Stream + trennt TCP sauber
+Änderungen v3 gegenüber v2:
+  - 0xF9/0x0A-Block wird jetzt geparst: 28-Byte-Header verworfen,
+    Datensätze (128B) extrahieren Kanalliste + PAT-Index direkt
+  - 0xF9/0x01-Stream: 28-Byte-Header wird verworfen, nur reiner MPEG-TS geschrieben
+  - dCBWDataTransferLength: laut USB-BOT-Spec Little-Endian (verifiziert aus PCAP)
+  - Kanalliste wird aus 0xF9/0x0A gebaut (kein EPG-TCP-Scan mehr nötig)
+  - Kanalwechsel per verifiziertem PAT-Index aus Service-DB
+  - Daemon-Hintergrund: icube Corp. apixd (Seoul, KR)
 """
 
 from __future__ import annotations
@@ -37,9 +29,6 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -56,22 +45,61 @@ UDP_PORT        = 8800
 MAGIC_TAG       = b"\xA0\xCB\x03\x37"
 CONNECT_TIMEOUT = 5.0
 RECV_TIMEOUT    = 4.0
-KEEPALIVE_INTVL = 2.0       # Sekunden zwischen 0x16 Keep-Alives
-SIGNAL_INTVL    = 3.0       # Sekunden zwischen Signal-Polls
-UDP_BLOCK_SIZE  = 0xBC00    # 48128 Byte Anforderungsgröße (= 256 TS-Pakete)
-TS_PKT_SIZE     = 188
-TS_SYNC         = 0x47
-USBS_LEN        = 13        # USBS-Status-Trailer ist immer 13 Byte
+KEEPALIVE_INTVL = 2.0
+SIGNAL_INTVL    = 3.0
 
-# Bekannte prog_idx-Präfixe laut PCAP-Analyse
-KNOWN_PROG_IDX_GROUPS = [
-    0x40B40000, 0x40B70000, 0x40DE0000,
-    0x48A50000, 0x40B80000, 0x40BA0000,
-]
+# UDP-Block: 32.740 Byte = 28 Byte Header + 174 × 188 Byte TS
+UDP_RESPONSE_SIZE = 32_740
+UDP_HEADER_SIZE   = 28        # Diese Bytes am Anfang jedes 0xF9-Blocks verwerfen
+UDP_TS_SIZE       = 32_712    # 174 × 188 Byte reiner MPEG-TS
+UDP_REQUEST_LEN   = 0xBC00    # 48128 – Anforderungsgröße im USBC-datalen-Feld
+
+# dCBWDataTransferLength: USB-BOT-Spec sagt Little-Endian
+# Aus PCAP: 0xBC00 steht als "00 BC 00 00" → bestätigt Little-Endian
+CBW_LEN_FORMAT = "<I"   # Little-Endian uint32
+
+TS_PKT_SIZE = 188
+TS_SYNC     = 0x47
+USBS_LEN    = 13   # USBS-Status-Trailer
+
+# Service-Datensatz-Layout im 0xF9/0x0A-Block (ab Offset 32, je 128 Byte)
+SERVICE_ENTRY_SIZE  = 128
+SERVICE_DB_HEADER   = 32   # Bytes zu überspringen vor erstem Datensatz
+
 
 # ---------------------------------------------------------------------------
 # Datenmodelle
 # ---------------------------------------------------------------------------
+@dataclass
+class ServiceEntry:
+    """Ein Eintrag aus dem 0xF9/0x0A Service-DB-Block."""
+    pat_index:   int          # Position im Array = PAT-Index für 0x01-Tune
+    prog_idx:    int          # 0x40xxxxxx=FTA, 0x48xxxxxx=Pay-TV
+    service_id:  int          # DVB Service ID
+    pmt_pid:     int
+    pcr_pid:     int
+    video_pid:   int
+    video_type:  int          # 0x1B=H.264, 0x02=MPEG-2
+    audio_pid:   int
+    audio_type:  int          # 0x03=MPEG-1 Audio L2, 0x0F=AAC
+    flags:       int          # 0x0001=Aktiv, 0x0008=Verschlüsselt
+    name:        str
+
+    @property
+    def is_encrypted(self) -> bool:
+        return bool(self.flags & 0x0008) or (self.prog_idx >> 24) == 0x48
+
+    @property
+    def is_active(self) -> bool:
+        return bool(self.flags & 0x0001)
+
+    def __str__(self) -> str:
+        lock = "🔒" if self.is_encrypted else "FTA"
+        return (f"[{self.pat_index:3d}] sid={self.service_id:5d} "
+                f"vpid={self.video_pid:#06x} apid={self.audio_pid:#06x} "
+                f"[{lock}] {self.name}")
+
+
 @dataclass
 class Event:
     evt_id: int
@@ -79,87 +107,53 @@ class Event:
     date:   str = ""
     time_:  str = ""
     dur:    str = ""
-    rating: int = 0
-
 
 @dataclass
 class Channel:
-    s_id:      int
-    ts_id:     int
-    prog_idx:  int
-    pat_index: int = 0        # Index in der PAT-Liste (für 0x01-Tune-Payload)
-    events:    List[Event] = field(default_factory=list)
+    service:  ServiceEntry
+    events:   List[Event] = field(default_factory=list)
 
     @property
-    def is_encrypted(self) -> bool:
-        return (self.prog_idx >> 24) == 0x48
+    def s_id(self) -> int:
+        return self.service.service_id
 
-    def __str__(self) -> str:
-        lock = "🔒" if self.is_encrypted else "FTA"
-        evt  = self.events[0].desc[:35] if self.events else "(kein EPG)"
-        return f"s_id={self.s_id:5d}  idx={self.prog_idx:#010x}  [{lock}]  {evt}"
+    @property
+    def pat_index(self) -> int:
+        return self.service.pat_index
 
 
 # ---------------------------------------------------------------------------
-# USBC-Builder (31 Byte)
+# USBC-Builder
 # ---------------------------------------------------------------------------
 def _build_usbc(data_len: int, flags: int, prefix: int,
                 opcode: int, payload: bytes = b"") -> bytes:
     """
-    Baut einen 31-Byte USBC Command Block:
-      [0..3]   'USBC'
-      [4..7]   Magic A0 CB 03 37
-      [8..11]  Datenlänge Big-Endian
-      [12]     Flags (0x80=Lesen, 0x00=Schreiben)
-      [13]     LUN 0x00
-      [14]     CDB-Länge 0x10 (16 Byte)
-      [15..30] CDB: prefix + 'APIX' + opcode + payload (auf 16 B aufgefüllt)
+    31-Byte USBC Command Block (USB Bulk-Only Transport CBW).
+    data_len wird als Little-Endian kodiert (USB-BOT-Spec).
     """
     cdb = (bytes([prefix]) + b"APIX" + bytes([opcode]) + payload).ljust(16, b"\x00")
-    if len(cdb) != 16:
-        raise ValueError(f"CDB-Länge {len(cdb)} statt 16 – payload zu lang?")
-    pkt = (b"USBC" + MAGIC_TAG
-           + struct.pack(">I", data_len)
-           + bytes([flags, 0x00, 0x10])
-           + cdb)
-    assert len(pkt) == 31, f"USBC-Länge {len(pkt)} erwartet 31"
-    return pkt
+    assert len(cdb) == 16
+    return (b"USBC" + MAGIC_TAG
+            + struct.pack(CBW_LEN_FORMAT, data_len)   # Little-Endian!
+            + bytes([flags, 0x00, 0x10])
+            + cdb)
 
 
-# ---------------------------------------------------------------------------
 # Befehls-Builder
-# ---------------------------------------------------------------------------
-def _cmd_16() -> bytes:
-    return _build_usbc(12, 0x80, 0xF6, 0x16)
-
-def _cmd_17_init() -> bytes:
-    return _build_usbc(4, 0x80, 0xF6, 0x17)
-
-def _cmd_17_confirm() -> bytes:
-    # Nach Tune: 0x17 mit payload=01 00 00 00 bestätigt Kanalwechsel
-    return _build_usbc(4, 0x80, 0xF6, 0x17, b"\x01\x00\x00\x00")
-
-def _cmd_signal() -> bytes:
-    return _build_usbc(17, 0x80, 0xF6, 0x02)
+def _cmd_16()           -> bytes: return _build_usbc(12, 0x80, 0xF6, 0x16)
+def _cmd_17_init()      -> bytes: return _build_usbc(4,  0x80, 0xF6, 0x17)
+def _cmd_17_confirm()   -> bytes: return _build_usbc(4,  0x80, 0xF6, 0x17, b"\x01\x00\x00\x00")
+def _cmd_signal()       -> bytes: return _build_usbc(17, 0x80, 0xF6, 0x02)
+def _cmd_stream_release() -> bytes: return _build_usbc(4, 0x00, 0xF8, 0x07)
 
 def _cmd_epg_size(prog_idx: int) -> bytes:
     return _build_usbc(6, 0x80, 0xF6, 0x30, struct.pack(">I", prog_idx))
 
 def _cmd_epg_data(prog_idx: int, offset: int, length: int) -> bytes:
-    # Payload aus PCAP: prog_idx (4B) + offset (2B) – kein length im Payload
     return _build_usbc(length, 0x80, 0xF6, 0x31,
                        struct.pack(">I", prog_idx) + struct.pack(">H", offset))
 
-def _cmd_evt_size(s_id: int) -> bytes:
-    return _build_usbc(6, 0x80, 0xF6, 0x35, struct.pack(">I", s_id))
-
-def _cmd_evt_data(s_id: int, length: int) -> bytes:
-    return _build_usbc(length, 0x80, 0xF6, 0x36,
-                       struct.pack(">I", s_id) + struct.pack(">H", 0))
-
 def _cmd_prepare(prog_idx: int) -> bytes:
-    # PCAP-verifiziert: payload = 00 00 00 02 + prog_idx (4B)
-    # Flags=0x00 (Schreiben), datalen=4
     return _build_usbc(4, 0x00, 0xF6, 0x03,
                        b"\x00\x00\x00\x02" + struct.pack(">I", prog_idx))
 
@@ -170,27 +164,21 @@ def _cmd_chinfo_data(prog_idx: int, length: int) -> bytes:
     return _build_usbc(length, 0x80, 0xF6, 0x33, struct.pack(">I", prog_idx))
 
 def _cmd_tune(pat_index: int) -> bytes:
-    # Payload aus PCAP für Prog 4914: 00 04 (Byte[1] = PAT-Index)
+    # Byte[0]=0x00 Flag, Byte[1]=PAT-Array-Index (0-basiert)
     return _build_usbc(2, 0x00, 0xF6, 0x01,
                        bytes([0x00, pat_index & 0xFF]))
 
-def _cmd_stream_release() -> bytes:
-    # 0xF8/0x07 – Stream-Freigabe nach Tune
-    return _build_usbc(4, 0x00, 0xF8, 0x07)
-
 def _udp_init() -> bytes:
-    # 0xF9/0x02 – einmalige Stream-Initialisierung
     return _build_usbc(0, 0x00, 0xF9, 0x02, b"\x01")
 
-def _udp_epg_poll() -> bytes:
-    # 0xF9/0x0A – EPG-Metadaten per UDP (vor Stream)
-    return _build_usbc(UDP_BLOCK_SIZE, 0x80, 0xF9, 0x0A)
+def _udp_service_db() -> bytes:
+    """0xF9/0x0A – Vorkompilierte Service-Datenbank anfordern."""
+    return _build_usbc(UDP_REQUEST_LEN, 0x80, 0xF9, 0x0A)
 
 def _udp_request_block(first: bool = False) -> bytes:
-    # 0xF9/0x01 – MPEG-TS-Block anfordern
-    # Byte[21]: 0x00 für ersten Block, 0x01 für alle weiteren
+    """0xF9/0x01 – MPEG-TS-Block anfordern (Pull)."""
     byte21 = b"\x00" if first else b"\x01"
-    return _build_usbc(UDP_BLOCK_SIZE, 0x80, 0xF9, 0x01, byte21)
+    return _build_usbc(UDP_REQUEST_LEN, 0x80, 0xF9, 0x01, byte21)
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +186,6 @@ def _udp_request_block(first: bool = False) -> bytes:
 # ---------------------------------------------------------------------------
 def _recv_exactly(sock: socket.socket, n: int,
                   timeout: float = RECV_TIMEOUT) -> bytes:
-    """Liest exakt n Byte. Gibt weniger zurück bei Timeout/EOF."""
     sock.settimeout(timeout)
     buf = bytearray()
     try:
@@ -216,17 +203,14 @@ def _recv_exactly(sock: socket.socket, n: int,
 
 def _send_recv(sock: socket.socket, cmd: bytes,
                data_len: int, label: str = "") -> bytes:
-    """
-    Sendet Befehl, liest data_len Nutzdaten + 13-Byte USBS-Trailer.
-    Gibt nur die Nutzdaten zurück (ohne USBS).
-    """
+    """Sendet Befehl, liest Nutzdaten (ohne USBS-Trailer)."""
     sock.sendall(cmd)
     raw = _recv_exactly(sock, data_len + USBS_LEN)
     payload = raw[:data_len]
     if label:
-        log.debug("%-20s  tx=%dB  rx=%dB  data=%s",
+        log.debug("%-22s tx=%dB rx=%dB head=%s",
                   label, len(cmd), len(raw),
-                  payload[:min(8, len(payload))].hex())
+                  payload[:min(6, len(payload))].hex())
     return payload
 
 
@@ -234,8 +218,7 @@ def _send_recv(sock: socket.socket, cmd: bytes,
 # Phase 1: Verbinden + Init
 # ---------------------------------------------------------------------------
 def connect(ip: str) -> Optional[socket.socket]:
-    """TCP-Verbindung herstellen + Init-Handshake (0x16 + 0x17)."""
-    log.info("Verbinde mit %s:%d ...", ip, TCP_PORT)
+    log.info("Verbinde %s:%d ...", ip, TCP_PORT)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(CONNECT_TIMEOUT)
     try:
@@ -245,24 +228,18 @@ def connect(ip: str) -> Optional[socket.socket]:
         sock.close()
         return None
     sock.settimeout(None)
-    log.info("TCP verbunden.")
 
-    # 0x16 – Init, Gerätestatus
     r = _send_recv(sock, _cmd_16(), 12, "0x16 init")
     if len(r) < 2:
-        log.error("0x16: keine Antwort")
-        sock.close()
-        return None
-    status = r[1]  # Byte[1] = 0x00 (nicht bereit) oder 0x01 (bereit)
+        log.error("0x16: keine Antwort"); sock.close(); return None
+    status = r[1]
     log.info("0x16 status=0x%02X  gerät=%s", status, r[2:7].hex())
 
-    # 0x17 – Init Phase 2
     r = _send_recv(sock, _cmd_17_init(), 4, "0x17 init")
     log.info("0x17 flag=0x%02X", r[1] if len(r) > 1 else 0xFF)
 
-    # Auf Bereitschaft warten (Status muss 0x01 werden)
     if status != 0x01:
-        log.info("Warte auf Dongle-Bereitschaft ...")
+        log.info("Warte auf Bereitschaft ...")
         for _ in range(10):
             time.sleep(0.5)
             r = _send_recv(sock, _cmd_16(), 12, "0x16 poll")
@@ -270,8 +247,7 @@ def connect(ip: str) -> Optional[socket.socket]:
                 log.info("Dongle bereit.")
                 break
         else:
-            log.warning("Dongle meldet noch nicht 0x01 – trotzdem weiter.")
-
+            log.warning("Dongle nicht 0x01 – weiter.")
     return sock
 
 
@@ -280,11 +256,11 @@ def disconnect(sock: socket.socket) -> None:
         sock.close()
     except OSError:
         pass
-    log.info("TCP-Verbindung getrennt.")
+    log.info("Verbindung getrennt.")
 
 
 # ---------------------------------------------------------------------------
-# Keep-Alive Thread (TCP 0x16 alle KEEPALIVE_INTVL Sekunden)
+# Keep-Alive Thread
 # ---------------------------------------------------------------------------
 def _keepalive_worker(sock: socket.socket,
                       lock: threading.Lock,
@@ -298,242 +274,210 @@ def _keepalive_worker(sock: socket.socket,
         except OSError as e:
             log.debug("Keep-Alive Fehler: %s", e)
             break
-    log.debug("Keep-Alive Thread beendet.")
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: EPG laden
+# Service-DB aus 0xF9/0x0A parsen (NEU – ersetzt EPG-TCP-Scan)
 # ---------------------------------------------------------------------------
-def scan_prog_idx(sock: socket.socket,
-                  lock: threading.Lock,
-                  stop_event: threading.Event,
-                  max_per_group: int = 50) -> List[int]:
+def parse_service_db(data: bytes) -> List[ServiceEntry]:
     """
-    Scannt bekannte prog_idx-Gruppen und findet gültige Einträge
-    (solche, bei denen 0x30 eine Größe > 0 zurückliefert).
+    Parst den 32.740-Byte-Block von 0xF9/0x0A.
+    Struktur: 28-Byte UDP-Header + 32-Byte DB-Header + N × 128-Byte-Datensätze.
+
+    Gibt Liste von ServiceEntry zurück, indiziert = PAT-Index für 0x01-Tune.
     """
-    found = []
-    for base in KNOWN_PROG_IDX_GROUPS:
-        if stop_event.is_set():
+    if len(data) < UDP_HEADER_SIZE + SERVICE_DB_HEADER:
+        log.warning("Service-DB zu kurz: %d Byte", len(data))
+        return []
+
+    # 28-Byte UDP-Response-Header verwerfen (F9 0A 00 00 ...)
+    body = data[UDP_HEADER_SIZE:]
+    # Weiteren 32-Byte DB-Header verwerfen
+    entries_raw = body[SERVICE_DB_HEADER:]
+
+    services: List[ServiceEntry] = []
+    idx = 0
+    offset = 0
+    while offset + SERVICE_ENTRY_SIZE <= len(entries_raw):
+        rec = entries_raw[offset:offset + SERVICE_ENTRY_SIZE]
+
+        prog_idx   = struct.unpack_from(">I", rec, 0x00)[0]
+        service_id = struct.unpack_from(">H", rec, 0x04)[0]
+        pmt_pid    = struct.unpack_from(">H", rec, 0x06)[0]
+        pcr_pid    = struct.unpack_from(">H", rec, 0x08)[0]
+        video_pid  = struct.unpack_from(">H", rec, 0x0A)[0]
+        video_type = rec[0x0C]
+        audio_pid  = struct.unpack_from(">H", rec, 0x0D)[0]
+        audio_type = rec[0x0F]
+        flags      = struct.unpack_from(">H", rec, 0x10)[0]
+        name_raw   = rec[0x12:0x32]
+        name       = name_raw.rstrip(b"\x00").decode("iso-8859-15", errors="replace")
+
+        # Leere / ungültige Einträge überspringen
+        if service_id == 0 and prog_idx == 0:
+            offset += SERVICE_ENTRY_SIZE
+            idx += 1
+            continue
+
+        services.append(ServiceEntry(
+            pat_index=idx,
+            prog_idx=prog_idx,
+            service_id=service_id,
+            pmt_pid=pmt_pid,
+            pcr_pid=pcr_pid,
+            video_pid=video_pid,
+            video_type=video_type,
+            audio_pid=audio_pid,
+            audio_type=audio_type,
+            flags=flags,
+            name=name,
+        ))
+        offset += SERVICE_ENTRY_SIZE
+        idx += 1
+
+    log.info("Service-DB geparst: %d Einträge.", len(services))
+    return services
+
+
+def fetch_service_db(udp: socket.socket, dongle_ip: str,
+                     attempts: int = 5) -> List[ServiceEntry]:
+    """Holt die Service-DB via 0xF9/0x0A (mehrere Versuche)."""
+    cmd = _udp_service_db()
+    for attempt in range(attempts):
+        udp.sendto(cmd, (dongle_ip, UDP_PORT))
+        try:
+            data, _ = udp.recvfrom(65535)
+            if len(data) >= UDP_HEADER_SIZE + SERVICE_DB_HEADER:
+                log.info("Service-DB empfangen: %d Byte (Versuch %d)", len(data), attempt + 1)
+                return parse_service_db(data)
+        except socket.timeout:
+            log.debug("0xF9/0x0A Timeout (Versuch %d/%d)", attempt + 1, attempts)
+        time.sleep(0.5)
+    log.warning("Service-DB nicht empfangen – nutze leere Liste.")
+    return []
+
+
+# ---------------------------------------------------------------------------
+# EPG via TCP laden (optional, ergänzt Service-DB mit Programm-Infos)
+# ---------------------------------------------------------------------------
+def enrich_with_epg(sock: socket.socket, lock: threading.Lock,
+                    services: List[ServiceEntry],
+                    stop: threading.Event) -> Dict[int, List[Event]]:
+    """Lädt EPG-Ereignisse per TCP 0x30/0x31 für alle Service-Einträge."""
+    epg: Dict[int, List[Event]] = {}
+    for svc in services:
+        if stop.is_set():
             break
-        for seq in range(max_per_group):
-            pidx = base | seq
-            with lock:
-                r = _send_recv(sock, _cmd_epg_size(pidx), 6, f"0x30 scan {pidx:#010x}")
-            if len(r) >= 4:
-                size = struct.unpack(">I", r[:4])[0]
-                if size > 0:
-                    found.append(pidx)
-    log.info("prog_idx-Scan: %d gültige Einträge gefunden.", len(found))
-    return found
-
-
-def load_epg(sock: socket.socket,
-             lock: threading.Lock,
-             prog_idx_list: List[int],
-             stop_event: threading.Event) -> Dict[int, Channel]:
-    """
-    Lädt EPG-XML für eine Liste von prog_idx-Werten.
-    Gibt {s_id: Channel} zurück.
-    """
-    channels: Dict[int, Channel] = {}
-    total = len(prog_idx_list)
-
-    for i, pidx in enumerate(prog_idx_list):
-        if stop_event.is_set():
-            break
-
-        # Größe abfragen
         with lock:
-            r = _send_recv(sock, _cmd_epg_size(pidx), 6, f"0x30 [{i+1}/{total}]")
+            r = _send_recv(sock, _cmd_epg_size(svc.prog_idx), 6,
+                           f"0x30 sid={svc.service_id}")
         if len(r) < 4:
             continue
         size = struct.unpack(">I", r[:4])[0]
         if size == 0:
             continue
-
-        # XML laden
         with lock:
-            r = _send_recv(sock, _cmd_epg_data(pidx, 0, size), size,
-                           f"0x31 [{i+1}/{total}]")
+            r = _send_recv(sock, _cmd_epg_data(svc.prog_idx, 0, size), size,
+                           f"0x31 sid={svc.service_id}")
         try:
             root = ET.fromstring(r.decode("utf-8", errors="replace"))
-        except ET.ParseError as e:
-            log.debug("EPG-XML Parse-Fehler bei %#010x: %s", pidx, e)
-            continue
-
-        for ch_el in root.findall("ch"):
-            s_id  = int(ch_el.get("s_id", 0))
-            ts_id = int(ch_el.get("ts_id", 0))
-            ch = Channel(s_id=s_id, ts_id=ts_id, prog_idx=pidx)
-            for evt_el in ch_el.findall("evt"):
-                ch.events.append(Event(
-                    evt_id=int(evt_el.get("id", 0)),
-                    desc=evt_el.get("des", ""),
-                    date=evt_el.get("date", ""),
-                    time_=evt_el.get("time", ""),
-                    dur=evt_el.get("dur", ""),
-                    rating=int(evt_el.get("rating", 0)),
-                ))
-            channels[s_id] = ch
-
-    log.info("EPG geladen: %d Kanäle.", len(channels))
-    return channels
+            evts = []
+            for ch_el in root.findall("ch"):
+                for evt_el in ch_el.findall("evt"):
+                    evts.append(Event(
+                        evt_id=int(evt_el.get("id", 0)),
+                        desc=evt_el.get("des", ""),
+                        date=evt_el.get("date", ""),
+                        time_=evt_el.get("time", ""),
+                        dur=evt_el.get("dur", ""),
+                    ))
+            epg[svc.service_id] = evts
+        except ET.ParseError:
+            pass
+    return epg
 
 
 # ---------------------------------------------------------------------------
 # Phase 3: Kanal vorbereiten
 # ---------------------------------------------------------------------------
-def prepare_channel(sock: socket.socket,
-                    lock: threading.Lock,
-                    ch: Channel) -> bool:
-    """
-    0x03 (prepare) → 0x32/0x33 (ch_Info, liefert auch pat_index) → 0x02 (Signal).
-    Gibt True zurück wenn Signal stark genug.
-    """
-    pidx = ch.prog_idx
-
-    # 0x03 – Kanal vorauswählen
+def prepare_channel(sock: socket.socket, lock: threading.Lock,
+                    svc: ServiceEntry) -> None:
     with lock:
-        _send_recv(sock, _cmd_prepare(pidx), 0, "0x03 prepare")
-
-    # 0x32/0x33 – ch_Info: s_id + prog_idx bestätigen + PAT-Index auslesen
+        _send_recv(sock, _cmd_prepare(svc.prog_idx), 0, "0x03 prepare")
     with lock:
-        r = _send_recv(sock, _cmd_chinfo_size(pidx), 6, "0x32 chinfo-size")
+        r = _send_recv(sock, _cmd_chinfo_size(svc.prog_idx), 6, "0x32 chinfo-size")
     if len(r) >= 4:
         ci_size = struct.unpack(">I", r[:4])[0]
         if ci_size > 0:
             with lock:
-                r = _send_recv(sock, _cmd_chinfo_data(pidx, ci_size), ci_size,
+                r = _send_recv(sock, _cmd_chinfo_data(svc.prog_idx, ci_size), ci_size,
                                "0x33 chinfo")
-            xml_str = r.decode("utf-8", errors="replace")
-            log.debug("ch_Info: %s", xml_str[:120])
-            # PAT-Index aus ch_Info extrahieren (falls enthalten)
-            try:
-                root = ET.fromstring(xml_str)
-                for el in root.iter("ch"):
-                    pat_idx = el.get("pat_idx") or el.get("prog_no")
-                    if pat_idx is not None:
-                        ch.pat_index = int(pat_idx)
-                        log.info("ch_Info: pat_index=%d", ch.pat_index)
-            except ET.ParseError:
-                pass
+            log.debug("ch_Info: %s", r.decode("utf-8", "replace")[:80])
 
-    # 0x02 – Signal pollen (3 Versuche mit SIGNAL_INTVL Abstand)
     for attempt in range(3):
         time.sleep(SIGNAL_INTVL)
         with lock:
             r = _send_recv(sock, _cmd_signal(), 17, f"0x02 signal [{attempt+1}/3]")
-        # PCAP: r[0]=0x00, r[1]=Stärke(0x64=100%), r[2]=Qualität(0x3B–3D)
         if len(r) >= 3:
-            strength = r[1]
-            quality  = r[2]
-            log.info("Signal: Stärke=%d%%  Qualität=%d", strength, quality)
-            if strength >= 50:
-                return True
-
-    log.warning("Signal schwach – trotzdem weiter.")
-    return True
+            log.info("Signal: Stärke=%d%%  Qualität=%d", r[1], r[2])
+            if r[1] >= 50:
+                return
+    log.warning("Signal schwach – weiter.")
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 + 5: UDP Pre-Polling + Tune + Stream
+# Phase 4+5: Tune + MPEG-TS-Stream
 # ---------------------------------------------------------------------------
-def _udp_epg_prepoll(udp: socket.socket, dongle_ip: str,
-                     count: int = 10, stop: threading.Event = None) -> None:
+def stream(tcp_sock: socket.socket, lock: threading.Lock,
+           svc: ServiceEntry, output_path: str,
+           duration_s: float = 0.0) -> None:
     """
-    Sendet 0xF9/0x0A (EPG per UDP, ~10–200× laut PCAP) vor dem eigentlichen Tune.
-    Verkürzt auf 10 im normalen Betrieb; für PCAP-exaktes Verhalten 200 setzen.
-    """
-    cmd = _udp_epg_poll()
-    for i in range(count):
-        if stop and stop.is_set():
-            break
-        udp.sendto(cmd, (dongle_ip, UDP_PORT))
-        try:
-            udp.recvfrom(65535)
-        except socket.timeout:
-            pass
-        if i < count - 1:
-            time.sleep(0.06)
-    log.debug("0xF9/0x0A Pre-Poll abgeschlossen (%d×).", count)
-
-
-def stream(tcp_sock: socket.socket,
-           lock: threading.Lock,
-           ch: Channel,
-           output_path: str,
-           duration_s: float = 0.0,
-           epg_prepoll: int = 10) -> None:
-    """
-    Startet den MPEG-TS-Pull-Stream für einen Kanal.
-
-    Args:
-        tcp_sock:    offene TCP-Verbindung zum Dongle
-        lock:        Mutex für TCP-Zugriff (Keep-Alive läuft parallel)
-        ch:          Kanalinfos (prog_idx, pat_index)
-        output_path: Dateipfad oder '-' für stdout
-        duration_s:  0 = unbegrenzt
-        epg_prepoll: Anzahl 0xF9/0x0A-Pakete vor dem Tune (0 = überspringen)
+    Startet MPEG-TS-Pull-Stream.
+    Verwirft den 28-Byte-Header jedes 0xF9/0x01-Antwortblocks.
     """
     stop = threading.Event()
     dongle_ip = tcp_sock.getpeername()[0]
 
-    # Keep-Alive starten
-    ka_thread = threading.Thread(
-        target=_keepalive_worker,
-        args=(tcp_sock, lock, stop),
-        daemon=True,
-        name="tcp-ka",
-    )
-    ka_thread.start()
+    ka = threading.Thread(target=_keepalive_worker,
+                          args=(tcp_sock, lock, stop), daemon=True)
+    ka.start()
 
-    # UDP-Socket ZUERST binden (kein Paketverlust durch spätes Bind)
+    # UDP-Socket VOR Tune binden
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
     udp.bind(("", UDP_PORT))
     udp.settimeout(5.0)
 
     try:
-        # 1. UDP Stream-Init (0xF9/0x02)
+        # UDP Init
         udp.sendto(_udp_init(), (dongle_ip, UDP_PORT))
         try:
             udp.recvfrom(256)
         except socket.timeout:
             pass
-        log.debug("0xF9/0x02 gesendet.")
 
-        # 2. UDP EPG Pre-Poll (0xF9/0x0A) – optional
-        if epg_prepoll > 0:
-            log.info("UDP EPG Pre-Poll (%d×) ...", epg_prepoll)
-            _udp_epg_prepoll(udp, dongle_ip, count=epg_prepoll, stop=stop)
-
-        # 3. Tune-Befehl (0x01) über TCP
+        # Tune (TCP)
         with lock:
-            _send_recv(tcp_sock, _cmd_tune(ch.pat_index), 0, "0x01 tune")
-        log.info("0x01 Tune gesendet (pat_index=%d).", ch.pat_index)
+            _send_recv(tcp_sock, _cmd_tune(svc.pat_index), 0, "0x01 tune")
+        log.info("Tune: pat_index=%d  sid=%d  (%s)", svc.pat_index, svc.service_id, svc.name)
 
-        # 4. Stream-Freigabe (0xF8/0x07) über TCP
+        # Stream-Freigabe (TCP)
         with lock:
             _send_recv(tcp_sock, _cmd_stream_release(), 0, "0xF8/0x07 release")
-        log.debug("0xF8/0x07 Stream-Freigabe gesendet.")
 
-        # 5. Erster UDP-Block (Byte21=0x00)
+        # Erster UDP-Block (Byte21=0x00)
         udp.sendto(_udp_request_block(first=True), (dongle_ip, UDP_PORT))
 
-        # 6. Kanalwechsel bestätigen (0x17 mit payload=01000000) über TCP
+        # Tune bestätigen (TCP)
         with lock:
             r = _send_recv(tcp_sock, _cmd_17_confirm(), 4, "0x17 confirm")
-        log.info("0x17 Bestätigung: 0x%02X", r[1] if len(r) > 1 else 0xFF)
+        log.info("0x17 confirm: 0x%02X", r[1] if len(r) > 1 else 0xFF)
 
-        # 7. Stream-Loop
         out = (open(output_path, "wb")
-               if output_path != "-"
-               else sys.stdout.buffer)
-        log.info("Stream aktiv → %s   (STRG+C zum Beenden)",
-                 output_path if output_path != "-" else "stdout")
+               if output_path != "-" else sys.stdout.buffer)
+        log.info("Stream → %s  (STRG+C zum Beenden)", output_path)
 
-        t_start   = time.monotonic()
+        t_start = time.monotonic()
         block_num = 0
         ts_bytes  = 0
 
@@ -543,24 +487,27 @@ def stream(tcp_sock: socket.socket,
                 try:
                     data, _ = udp.recvfrom(65535)
                 except socket.timeout:
-                    log.warning("UDP-Timeout – kein Datenblock.")
+                    log.warning("UDP-Timeout")
                     break
 
                 # USBS oder 0xF9/0x0A-Echo ignorieren
                 if data[:4] == b"USBS" or data[:2] == b"\xf9\x0a":
                     continue
 
-                # TS-Sync suchen
-                if len(data) < 1:
-                    continue
-                if data[0] == TS_SYNC:
-                    ts_data = data
-                elif TS_SYNC in data[:200]:
-                    idx = data.index(TS_SYNC)
-                    ts_data = data[idx:]
+                # 28-Byte-Header verwerfen (NEU laut Deep Research)
+                if len(data) > UDP_HEADER_SIZE:
+                    ts_data = data[UDP_HEADER_SIZE:]
                 else:
-                    log.debug("Kein TS-Sync (0x%02X) – verworfen.", data[0])
-                    continue
+                    ts_data = data
+
+                # TS-Sync prüfen
+                if not ts_data or ts_data[0] != TS_SYNC:
+                    # Sync suchen
+                    idx = ts_data.find(bytes([TS_SYNC]))
+                    if idx == -1:
+                        log.debug("Kein TS-Sync – verworfen")
+                        continue
+                    ts_data = ts_data[idx:]
 
                 out.write(ts_data)
                 out.flush()
@@ -568,115 +515,128 @@ def stream(tcp_sock: socket.socket,
                 ts_bytes  += len(ts_data)
 
                 if block_num % 50 == 0:
-                    elapsed   = time.monotonic() - t_start
-                    rate_kbps = (ts_bytes / 1024) / max(elapsed, 0.001)
-                    log.info("Block %4d  |  %.1f MiB  |  %.0f KB/s",
-                             block_num, ts_bytes / 1_048_576, rate_kbps)
+                    elapsed = time.monotonic() - t_start
+                    kbps = (ts_bytes / 1024) / max(elapsed, 0.001)
+                    log.info("Block %4d | %.1f MiB | %.0f KB/s",
+                             block_num, ts_bytes / 1_048_576, kbps)
 
                 if duration_s > 0 and (time.monotonic() - t_start) >= duration_s:
-                    log.info("Zieldauer %.0f s erreicht.", duration_s)
+                    log.info("Dauer %.0f s erreicht.", duration_s)
                     break
 
         except KeyboardInterrupt:
             print()
-            log.info("Stream durch Nutzer abgebrochen.")
+            log.info("Abgebrochen.")
         finally:
             if output_path != "-":
                 out.close()
-            log.info("Stream beendet. Blöcke: %d  |  %.2f MiB",
-                     block_num, ts_bytes / 1_048_576)
+            log.info("Stream beendet. %d Blöcke, %.2f MiB", block_num, ts_bytes / 1_048_576)
 
     finally:
         stop.set()
-        ka_thread.join(timeout=4.0)
+        ka.join(timeout=4.0)
         udp.close()
 
 
 # ---------------------------------------------------------------------------
-# Bekannte Kanäle aus PCAP (Fallback ohne EPG-Scan)
+# Fallback: bekannte Kanäle (wenn Service-DB leer)
 # ---------------------------------------------------------------------------
-KNOWN_CHANNELS: Dict[int, Channel] = {
-    4914: Channel(
-        s_id=4914,
-        ts_id=33079,
-        prog_idx=0x40B40089,
-        pat_index=4,           # Index 4 in der PAT (bestätigt aus PCAP)
-        events=[Event(evt_id=0, desc="ZDF (Referenz-Kanal aus PCAP)")],
-    ),
-}
+_FALLBACK_SERVICE = ServiceEntry(
+    pat_index=4, prog_idx=0x40B40089, service_id=4914,
+    pmt_pid=0x006E, pcr_pid=0x1338,
+    video_pid=0x1338, video_type=0x1B,
+    audio_pid=0x1339, audio_type=0x03,
+    flags=0x0001, name="ZDF (Fallback aus PCAP)",
+)
 
 
 # ---------------------------------------------------------------------------
 # Interaktives Menü
 # ---------------------------------------------------------------------------
 _MENU = """
-╔══════════════════════════════════════════════════╗
-║       WISI O2D  –  DVB-over-IP Client v2        ║
-╠══════════════════════════════════════════════════╣
-║  [1]  EPG laden + Kanal wählen                  ║
-║  [2]  Stream starten (letzter/bekannter Kanal)  ║
-║  [3]  prog_idx-Gruppen scannen                  ║
-║  [4]  Verbindung neu aufbauen                   ║
-║  [q]  Beenden                                   ║
-╚══════════════════════════════════════════════════╝"""
+╔════════════════════════════════════════════════════╗
+║       WISI O2D  –  DVB-over-IP Client v3          ║
+╠════════════════════════════════════════════════════╣
+║  [1]  Service-DB laden (0xF9/0x0A) + Kanal wählen║
+║  [2]  EPG nachladen (TCP 0x30/0x31)               ║
+║  [3]  Stream starten                              ║
+║  [4]  PAT-Index testen (0–5)                      ║
+║  [5]  Verbindung neu aufbauen                     ║
+║  [q]  Beenden                                     ║
+╚════════════════════════════════════════════════════╝"""
 
 
-def _pick_channel(channels: Dict[int, Channel]) -> Optional[Channel]:
-    chlist = sorted(channels.values(), key=lambda c: c.s_id)
-    print(f"\n{'Nr':>4}  {'s_id':>6}  {'prog_idx':>12}  {'':>4}  Programm")
-    print("-" * 65)
-    for i, ch in enumerate(chlist, 1):
-        lock = "🔒" if ch.is_encrypted else "   "
-        evt  = ch.events[0].desc[:35] if ch.events else "(kein EPG)"
-        print(f"{i:>4}  {ch.s_id:>6}  {ch.prog_idx:#010x}  {lock}  {evt}")
+def _pick_service(services: List[ServiceEntry]) -> Optional[ServiceEntry]:
+    active = [s for s in services if s.is_active and not s.is_encrypted]
+    active += [s for s in services if s.is_active and s.is_encrypted]
+    if not active:
+        active = services
+
+    print(f"\n{\'Nr\':>4}  {\'PAT\':>4}  {\'sid\':>6}  {\'vpid\':>6}  {\'apid\':>6}  Name")
+    print("-" * 70)
+    for i, s in enumerate(active[:50], 1):
+        lock = "🔒" if s.is_encrypted else "   "
+        print(f"{i:>4}  {s.pat_index:>4}  {s.service_id:>6}  "
+              f"{s.video_pid:#06x}  {s.audio_pid:#06x}  {lock} {s.name}")
     print()
     try:
         nr = int(input("Nummer (0=Abbruch): "))
-        if 1 <= nr <= len(chlist):
-            return chlist[nr - 1]
+        if 1 <= nr <= len(active):
+            return active[nr - 1]
     except (ValueError, EOFError):
         pass
     return None
 
 
 def main_menu(sock: socket.socket, ip: str) -> None:
-    lock     = threading.Lock()
-    channels: Dict[int, Channel] = {}
-    selected: Optional[Channel]  = None
-    stop_epg = threading.Event()
+    lock      = threading.Lock()
+    services: List[ServiceEntry] = []
+    selected: Optional[ServiceEntry] = None
+    stop_epg  = threading.Event()
+
+    # UDP-Socket für Service-DB-Abfragen (wird wiederverwendet)
+    udp_ctrl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_ctrl.settimeout(3.0)
+
+    # Beim Start sofort Service-DB laden
+    log.info("Lade Service-DB via 0xF9/0x0A ...")
+    services = fetch_service_db(udp_ctrl, ip)
 
     print(_MENU)
     while True:
         try:
             choice = input("\nAuswahl > ").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            print()
-            break
+            print(); break
 
         if choice == "q":
             break
 
         elif choice == "1":
-            # Bekannte prog_idx aus PCAP + KNOWN_CHANNELS
-            pidx_list = [ch.prog_idx for ch in KNOWN_CHANNELS.values()]
-            # Demo-Ergänzung: erste 20 Einträge aus Gruppe 0x40B4
-            pidx_list += [0x40B40000 | i for i in range(20)]
-            stop_epg.clear()
-            log.info("Lade EPG für %d Einträge ...", len(pidx_list))
-            channels = load_epg(sock, lock, pidx_list, stop_epg)
-            if not channels:
-                log.warning("Keine EPG-Daten – nutze bekannte Kanäle.")
-                channels = KNOWN_CHANNELS.copy()
-            selected = _pick_channel(channels)
+            log.info("Lade Service-DB ...")
+            services = fetch_service_db(udp_ctrl, ip)
+            if not services:
+                log.warning("Leer – nutze Fallback.")
+                services = [_FALLBACK_SERVICE]
+            selected = _pick_service(services)
             if selected:
-                log.info("Ausgewählt: %s", selected)
+                log.info("Gewählt: %s", selected)
 
         elif choice == "2":
+            if not services:
+                log.warning("Erst [1] ausführen.")
+                continue
+            log.info("Lade EPG ...")
+            stop_epg.clear()
+            epg = enrich_with_epg(sock, lock, services, stop_epg)
+            log.info("EPG geladen für %d Kanäle.", len(epg))
+
+        elif choice == "3":
             if not selected:
-                selected = KNOWN_CHANNELS[4914]
-                log.info("Nutze Standard-Kanal s_id=4914")
+                selected = _FALLBACK_SERVICE
+                log.info("Nutze Fallback-Kanal sid=4914")
             if selected.is_encrypted:
-                log.warning("Kanal ist verschlüsselt – Stream evtl. nicht möglich.")
+                log.warning("Kanal verschlüsselt – Stream evtl. leer.")
             prepare_channel(sock, lock, selected)
             outfile = input("Ausgabedatei [stream.ts] (- für stdout): ").strip() or "stream.ts"
             dur_str = input("Dauer in Sekunden [0=unbegrenzt]: ").strip()
@@ -686,27 +646,30 @@ def main_menu(sock: socket.socket, ip: str) -> None:
                 dur = 0.0
             stream(sock, lock, selected, outfile, dur)
 
-        elif choice == "3":
-            log.info("Scanne prog_idx-Gruppen ...")
-            stop_epg.clear()
-            found = scan_prog_idx(sock, lock, stop_epg, max_per_group=30)
-            log.info("Gefunden: %s", [f"{p:#010x}" for p in found])
-
         elif choice == "4":
+            log.info("PAT-Index-Test (schickt 0x01 mit Index 0–5) ...")
+            for idx in range(6):
+                with lock:
+                    _send_recv(sock, _cmd_tune(idx), 0, f"0x01 idx={idx}")
+                log.info("Index %d gesendet – jetzt UDP-Block prüfen", idx)
+                input("  Enter für nächsten Index ...")
+
+        elif choice == "5":
+            udp_ctrl.close()
             disconnect(sock)
             time.sleep(0.5)
             new = connect(ip)
             if new is None:
-                log.error("Erneute Verbindung fehlgeschlagen.")
-                return
+                log.error("Verbindung fehlgeschlagen."); return
             sock = new
             lock = threading.Lock()
-            log.info("Erneut verbunden.")
+            udp_ctrl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_ctrl.settimeout(3.0)
             print(_MENU)
-
         else:
-            print("Unbekannte Eingabe. Bitte 1, 2, 3, 4 oder q.")
+            print("1–5 oder q.")
 
+    udp_ctrl.close()
     disconnect(sock)
 
 
@@ -715,17 +678,15 @@ def main_menu(sock: socket.socket, ip: str) -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="WISI O2D DVB-over-IP Client",
+        description="WISI O2D DVB-over-IP Client v3 (icube APIX)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--ip",        default=DEFAULT_IP,    help="Dongle-IP")
-    p.add_argument("--debug",     action="store_true",   help="Debug-Logging")
-    p.add_argument("--stream",    action="store_true",   help="Direkt streamen (kein Menü)")
-    p.add_argument("--prog",      type=int, default=4914, help="Programm-Nummer (s_id)")
-    p.add_argument("--output",    default="stream.ts",   help="Ausgabedatei oder - für stdout")
-    p.add_argument("--duration",  type=float, default=0.0, help="Dauer in Sekunden (0=unbegrenzt)")
-    p.add_argument("--prepoll",   type=int, default=10,  help="Anzahl 0xF9/0x0A Pre-Poll-Pakete")
-    p.add_argument("--no-prepoll", action="store_true",  help="0xF9/0x0A Pre-Poll überspringen")
+    p.add_argument("--ip",       default=DEFAULT_IP)
+    p.add_argument("--debug",    action="store_true")
+    p.add_argument("--stream",   action="store_true",  help="Direkt streamen")
+    p.add_argument("--pat-idx",  type=int, default=4,  help="PAT-Index für --stream")
+    p.add_argument("--output",   default="stream.ts")
+    p.add_argument("--duration", type=float, default=0.0)
     args = p.parse_args()
 
     if args.debug:
@@ -734,19 +695,23 @@ def main() -> None:
     sock = connect(args.ip)
     if sock is None:
         sys.exit(1)
-    log.info("✓ Dongle unter %s bereit.", args.ip)
-
     lock = threading.Lock()
 
     if args.stream:
-        ch = KNOWN_CHANNELS.get(args.prog)
-        if ch is None:
-            log.error("Programm %d unbekannt. Nutze --prog 4914.", args.prog)
-            disconnect(sock)
-            sys.exit(1)
-        prepare_channel(sock, lock, ch)
-        prepoll = 0 if args.no_prepoll else args.prepoll
-        stream(sock, lock, ch, args.output, args.duration, prepoll)
+        # Service-DB laden um PAT-Index zu verifizieren
+        udp_tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_tmp.settimeout(3.0)
+        services = fetch_service_db(udp_tmp, args.ip)
+        udp_tmp.close()
+
+        svc = next((s for s in services if s.pat_index == args.pat_idx), None)
+        if svc is None:
+            log.warning("PAT-Index %d nicht in Service-DB – nutze Fallback.", args.pat_idx)
+            svc = _FALLBACK_SERVICE
+            svc = ServiceEntry(**{**svc.__dict__, "pat_index": args.pat_idx})
+
+        prepare_channel(sock, lock, svc)
+        stream(sock, lock, svc, args.output, args.duration)
         disconnect(sock)
     else:
         main_menu(sock, args.ip)
