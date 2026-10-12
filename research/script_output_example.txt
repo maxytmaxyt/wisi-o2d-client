@@ -1,4 +1,4 @@
-C:\Users\Danie\Desktop>python3 hi.py --ip 192.168.178.32 --debug --output kanal1.ts
+C:\Users\user\Desktop>python3 hi.py --ip 192.168.178.32 --debug --output kanal1.ts
 18:19:09  INFO     Verbinde mit 192.168.178.32:8802 ...
 18:19:09  INFO     TCP-Steuerkanal verbunden.
 18:19:09  INFO     Init: APIX 0x16 ...
@@ -34,4 +34,4 @@ C:\Users\Danie\Desktop>python3 hi.py --ip 192.168.178.32 --debug --output kanal1
 durch den Hostcomputer abgebrochen
 18:19:40  INFO     Verbindung geschlossen. Stream-Datei: kanal1.ts
 
-C:\Users\Danie\Desktop>
+C:\Users\user\Desktop>
