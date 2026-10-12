@@ -1,39 +1,43 @@
 # WISI O2D Dongle – Reverse Engineering & Client
 
-> **Ziel:** Das proprietäre Streaming-Protokoll des **WISI O2D / Tivizen / TiViCon DVB-over-IP-Dongles** zu reverse-engineeren und anschließend eine eigene Anwendung zu bauen, die den Dongle direkt anspricht und DVB-Livestreams abspielt – ohne die originale Tivizen-App.
+> **Ziel:** Das proprietäre Streaming-Protokoll des **WISI O2D / Tivizen / TiViCon DVB-over-IP-Dongles** zu reverse-engineeren und eine eigene Anwendung zu bauen, die den Dongle direkt anspricht und DVB-Livestreams abspielt – ohne die originale Tivizen-App.
 
 ---
 
-## ▶ Schnellstart – Das ist die Datei die du benutzen sollst
+## ▶ Schnellstart
 
 ```bash
+# Verbinden + Kanalauswahl + Stream
 python3 src/wisi_menu.py --ip 192.168.178.32
 
-# Mit Debug-Ausgabe (zeigt alle Roh-Antworten des Dongles)
+# Mit Debug-Ausgabe (zeigt alle Roh-Bytes)
 python3 src/wisi_menu.py --ip 192.168.178.32 --debug
+
+# Stream direkt in VLC pipen
+python3 src/wisi_menu.py --ip 192.168.178.32 --stream --prog 4914 --output - | vlc -
 ```
 
-`src/wisi_menu.py` ist der **einzige aktive Client** – er wächst mit jedem Schritt der Roadmap.  
-Die Dateien in `archive/` sind alte Experimente und müssen nicht mehr angefasst werden.
+`src/wisi_menu.py` ist der **einzige aktive Client**. Dateien in `archive/` sind alte Experimente.
 
 ---
 
 ## Ordnerstruktur
 
 ```
-wisi-dongel/
+wisi-o2d-client/
 ├── src/
-│   └── wisi_menu.py          ← HIER ARBEITEN – aktiver Client
+│   └── wisi_menu.py                      ← aktiver Client (hier arbeiten)
 ├── archive/
-│   ├── wisi_dongle_client.py  ← alte Version v4 (Referenz)
-│   ├── wisi_dongle_v1.py      ← alte Version v1 (Referenz)
-│   └── wisi_dongle_simple.py  ← minimaler Proof-of-Concept (Referenz)
+│   ├── wisi_dongle_client.py             ← alte Version v4 (Referenz)
+│   ├── wisi_dongle_v1.py                 ← alte Version v1 (Referenz)
+│   └── wisi_dongle_simple.py             ← minimaler PoC (Referenz)
 ├── research/
-│   ├── deep_research_with_pcap.md       ← Protokollanalyse (wichtig!)
+│   ├── pcap_analysis.md                  ← vollständige Protokollanalyse ★
+│   ├── deep_research_with_pcap.md        ← ältere Analyse
 │   ├── deep_research_without_pcap.md
 │   ├── protocol_analysis_chatgpt.md
-│   ├── script_output_example.txt        ← Beispiel-Ausgabe
-│   └── capture_pcapdroid_2024-10-11.pcap ← Original-PCAP-Mitschnitt
+│   ├── script_output_example.txt
+│   └── capture_pcapdroid_2026-10-11.pcap ← PCAP-Mitschnitt (10 MB)
 └── README.md
 ```
 
@@ -43,78 +47,155 @@ wisi-dongel/
 
 | Schritt | Status | Beschreibung |
 |---------|--------|--------------|
-| **1** | ✅ Fertig | Dongle verbinden + Init-Handshake + interaktives Hauptmenü |
-| **2** | 🔲 Geplant | Kanalliste aus EPG laden, Kanal auswählen |
-| **3** | 🔲 Geplant | Stream starten → VLC / ffplay per subprocess |
-| **4** | 🔲 Geplant | Kanalwechsel (Tuning-Befehl erforschen) |
+| **1** | ✅ Fertig | Dongle verbinden + Init-Handshake (0x16/0x17) |
+| **2** | ✅ Fertig | EPG laden, Kanalliste aufbauen, Kanal auswählen |
+| **3** | ✅ Fertig | MPEG-TS-Stream starten + in Datei/VLC schreiben |
+| **4** | 🔲 Offen | Kanalwechsel (0x01 Payload für andere Kanäle bestätigen) |
+| **5** | 🔲 Offen | Android-App oder Web-UI |
 
 ---
 
 ## Protokoll-Überblick
 
+### Ports
+
 ```
-TCP 8802   Steuerkanal – USBC/APIX-Befehle + USBS-Antworten
-UDP 8800   Datenpfad   – MPEG-TS-Blöcke (256 × 188 Byte pro Datagramm)
+TCP 8802  – Steuerkanal (USBC/APIX-Befehle + USBS-Antworten + EPG-XML)
+UDP 8800  – Stream-Kanal (aktiv: Client fordert jeden Block an)
 ```
 
-### USBC-Container (31 Byte)
+### USBC-Container (31 Byte, beide Kanäle)
 
 | Offset | Länge | Inhalt |
 |--------|-------|--------|
-| 0–3    | 4     | Signatur `USBC` |
-| 4–7    | 4     | Tag (konstant `A0 CB 03 37`) |
-| 8–11   | 4     | Datenlänge – Big-Endian |
-| 12     | 1     | Flags (`0x80` = Einlesen) |
-| 13     | 1     | LUN (`0x00`) |
-| 14     | 1     | CDB-Länge (`0x10` = 16 Byte) |
-| 15–30  | 16    | Herstellerspezifischer APIX-Befehl |
+| 0–3 | 4 | Signatur `USBC` |
+| 4–7 | 4 | Magic Tag `A0 CB 03 37` (konstant) |
+| 8–11 | 4 | Datenlänge Big-Endian |
+| 12 | 1 | Flags (`0x80` = Lesen, `0x00` = Schreiben) |
+| 13 | 1 | LUN `0x00` |
+| 14 | 1 | CDB-Länge `0x10` (16 Byte) |
+| 15 | 1 | Prefix: `0xF6` (TCP-Befehle), `0xF8` (Stream-Freigabe), `0xF9` (UDP) |
+| 16–19 | 4 | `APIX` (ASCII) |
+| 20 | 1 | Opcode |
+| 21–30 | 10 | Payload / Padding |
 
-### Bekannte APIX-Opcodes
+### TCP-Opcodes (Steuerkanal, Prefix 0xF6)
 
-| Opcode | Richtung | Funktion |
-|--------|----------|----------|
-| `0x16` | TCP      | Initialisierung / Statusabfrage (12 Byte Antwort) |
-| `0x17` | TCP      | Zweite Initialisierungsabfrage (4 Byte Antwort) |
-| `0x30` | TCP      | EPG-Datensatzgröße abfragen (`prog_idx`) |
-| `0x31` | TCP      | EPG-XML abrufen |
-| `0x35` | TCP      | Ereignisbeschreibungsgröße abfragen |
-| `0x36` | TCP      | Ereignisbeschreibung abrufen |
-| `0x02` | UDP      | Pre-Init (einmalig vor 0x0A-Schleife) |
-| `0x0A` | UDP      | Vorbereitungsschleife vor MPEG-TS-Stream |
-| `0x01` | UDP      | MPEG-TS-Block anfordern (triggert UDP-Datagramm) |
-| `0x16` | TCP (KA) | Keep-Alive alle 2,5 s (verhindert Stream-Abbruch) |
+| Opcode | Funktion | Antwort |
+|--------|----------|---------|
+| `0x16` | Init + Keep-Alive (alle ~2 s) | 12 Byte: `[0]=0x00/0x01` (bereit-Flag) |
+| `0x17` | Init Phase 2 / Tune-Bestätigung | 4 Byte: `0x00` oder `0x01` |
+| `0x01` | **Kanal aktivieren (Tune-Trigger)** | USBS |
+| `0x02` | Signal-Status-Poll (alle ~3 s) | 13 Byte: Byte[1]=Stärke%, Byte[2]=Qualität |
+| `0x03` | Kanal vorauswählen (prepare tune) | USBS |
+| `0x30` | EPG-Größe abfragen | 6 Byte (Länge BE) |
+| `0x31` | EPG-XML abrufen | `<epg_Data>...</epg_Data>` |
+| `0x32` | ch_Info-Größe abfragen | 6 Byte |
+| `0x33` | ch_Info-XML abrufen | `<ch_Info>...</ch_Info>` |
+| `0x35` | Ereignis-Größe abfragen | 6 Byte |
+| `0x36` | Ereignis-XML abrufen | `<event_desc .../>` |
 
-### Protokoll-Ablauf
+| Prefix | Opcode | Funktion |
+|--------|--------|----------|
+| `0xF8` | `0x07` | Stream-Freigabe (nach Tune, vor erstem UDP-Block) |
+
+### UDP-Opcodes (Stream-Kanal, Prefix 0xF9)
+
+> **Wichtig:** Der UDP-Stream ist **kein passiver Push**. Der Client muss jeden Block aktiv anfordern!
+
+| Opcode | Funktion | Antwort |
+|--------|----------|---------|
+| `0x02` | Stream initialisieren (einmalig) | – |
+| `0x0A` | EPG-Metadaten per UDP anfordern (200×, pre-tune) | 32.740 Byte `F9 0A 00...` |
+| `0x01` | **MPEG-TS-Block anfordern** | 32.740 Byte (174 × 188 Byte TS-Pakete) |
+
+### Vollständiger Protokollablauf
 
 ```
-Client                          Dongle (192.168.178.32)
-  │── TCP connect :8802 ──────────────────────────────▶│
-  │── APIX 0x16 (Init) ─────────────────────────────▶  │  ← Schritt 1
-  │◀─ 12-Byte-Antwort ─────────────────────────────────│
-  │── APIX 0x17 (Init) ─────────────────────────────▶  │  ← Schritt 1
-  │◀─ 4-Byte-Antwort ──────────────────────────────────│
-  │── APIX 0x30 (EPG-Größe) ────────────────────────▶  │  ← Schritt 2
-  │◀─ 6 Byte (Länge als Big-Endian) ───────────────────│
-  │── APIX 0x31 (EPG-XML) ──────────────────────────▶  │  ← Schritt 2
-  │◀─ XML-Block (Kanalliste) ──────────────────────────│
-  │── APIX 0x02 (Pre-Init UDP) ─────────────────────▶  │  ← Schritt 3
-  │── APIX 0x0A (Pre-Stream Loop ~5 s) ─────────────▶  │  ← Schritt 3
-  │ ┌─ Keep-Alive-Thread: APIX 0x16 alle 2,5 s ──────▶│  ← Schritt 3
-  │── APIX 0x01 (Stream-Request via UDP) ───────────▶  │  ← Schritt 3
-  │◀─ UDP :8800 → 256 MPEG-TS-Pakete (48 128 Byte) ────│
+Phase 1 – TCP Init
+  → 0x16                     Dongle meldet Status=0x00
+  → 0x17                     Dongle meldet 0x00
+  → 0x16 (wiederholen)       Dongle meldet Status=0x01 = BEREIT
+
+Phase 2 – EPG laden (TCP, 252 Kanäle)
+  für jeden Kanal:
+    → 0x30 [prog_idx]        Größe des EPG-Blocks
+    → 0x31 [prog_idx]        <epg_Data><ch s_id="..." evt .../></epg_Data>
+  einmalig:
+    → 0x35 / 0x36            Ereignis-Detailbeschreibung (XML)
+  zwischendurch:
+    → 0x16                   Keep-Alive (alle ~2 s)
+
+Phase 3 – UDP EPG-Polling (parallel, t=5–30s)
+  → 0xF9/0x02               Stream-Init
+  → 0xF9/0x0A (×200)        EPG/Metadaten per UDP
+
+Phase 4 – Kanal vorbereiten (TCP)
+  → 0x03 [prog_idx, flag=2]  Kanal vorauswählen
+  → 0x32 / 0x33 [prog_idx]  ch_Info: s_id + prog_idx bestätigen
+  → 0x02 (alle ~3 s)         Signal pollen (Stärke=100%, Qualität≈60)
+
+Phase 5 – Tune + Stream (TCP + UDP)
+  → 0x01 [00 04]             Kanal aktivieren (Index in PAT-Liste)
+  → 0xF8/0x07                Stream-Freigabe
+  → 0xF9/0x01 [byte21=0x00]  Erster MPEG-TS-Block anfordern
+  ← 32.740 Byte MPEG-TS      174 Pakete: H.264 + 2× MPEG-1 Audio
+  → 0x17 [01 00 00 00]       Kanalwechsel bestätigen
+  → 0xF9/0x01 [byte21=0x01]  Weitere Blöcke (in Schleife)
+  → 0x16 (alle ~2 s)         TCP Keep-Alive während Stream läuft
 ```
 
-**Wichtig:** Ohne Keep-Alive bricht der Dongle den Stream nach ~20–30 s ab.
+---
+
+## Stream-Inhalt (aus PCAP, Programm 4914)
+
+```
+PAT: 22 Programme auf ts_id=33079
+PMT Prog 4914:
+  PID 0x1338  H.264 Video     (94% aller TS-Pakete)
+  PID 0x1339  MPEG-1 Audio 1
+  PID 0x133A  MPEG-1 Audio 2
+  PID 0x133E  Private Data (Teletext?)
+```
+
+## EPG-Format
+
+```xml
+<epg_Data>
+  <ch s_id="11110" ts_id="33079" prog_idx="1085735055">
+    <evt id="39442" des="heute Xpress" date="61324" time="13:25" dur="00:05" rating="0" />
+  </ch>
+</epg_Data>
+
+<event_desc s_id="11110" evt_id="39447"
+  name="Terra Xplore"
+  short_txt="Angstthema Krieg: Kämpfst du?"
+  ext_txt="..." />
+```
+
+## prog_idx Struktur
+
+```
+0x40xxxxxx  → normaler (FTA) Kanal
+0x48xxxxxx  → verschlüsselter Kanal (Pay-TV / CA)
+
+Byte[1..2]  → Transponder-Gruppe (0xB4, 0xB7, 0xDE ...)
+Byte[3]     → Sequenz-Nummer innerhalb des Transponders
+```
 
 ---
 
 ## Stand der Analyse
 
-- ✅ USBC/APIX-Rahmenformat vollständig rekonstruiert
-- ✅ Init-Sequenz (0x16 / 0x17) identifiziert
-- ✅ EPG-Abfrage (0x30/0x31, 0x35/0x36) mit XML-Antwortformat
-- ✅ MPEG-TS-Streaming via UDP mit 188-Byte-Paketstruktur
-- ✅ Keep-Alive-Mechanismus zur Stream-Stabilisierung
-- 🔲 Tuning-Befehl (Kanalwechsel) – Opcode noch nicht vollständig geklärt
-- 🔲 Scrambling/CA (Continuity-Counter-Analyse nötig)
-- 🔲 Vollständige eigene App (Android / Desktop)
+- ✅ USBC/APIX-Rahmenformat vollständig
+- ✅ Init-Sequenz (0x16/0x17) und Keep-Alive
+- ✅ EPG-Abfrage (0x30/0x31, 0x35/0x36) mit XML-Format
+- ✅ Kanal-Vorbereitung (0x03, 0x32/0x33)
+- ✅ Signal-Polling (0x02)
+- ✅ Tune-Ablauf (0x01 → 0xF8/0x07 → 0x17)
+- ✅ UDP-Stream: pull-basiert, 0xF9/0x01 fordert je 174 TS-Pakete an
+- ✅ MPEG-TS-Inhalt: H.264 + MPEG-1 Audio, PAT/PMT ausgelesen
+- ✅ 252 Kanäle mit EPG auf ts_id=33079 identifiziert
+- 🔲 0x01-Payload für andere Kanäle (Index in PAT?) bestätigen
+- 🔲 0xF9/0x0A-Antwortformat (proprietäres Binär) dekodieren
+- 🔲 Pay-TV / verschlüsselte Kanäle (0x48-prog_idx)
