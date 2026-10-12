@@ -1,6 +1,8 @@
-# WISI O2D Dongle – Reverse Engineering & Client
+# WISI OR S2D Dongle – Reverse Engineering & Client
 
-> **Ziel:** Das proprietäre Streaming-Protokoll des **WISI O2D / Tivizen / TiViCon DVB-over-IP-Dongles** zu reverse-engineeren und eine eigene Anwendung zu bauen, die den Dongle direkt anspricht und DVB-Livestreams abspielt – ohne die originale Tivizen-App.
+> **Namenskorrektur:** Das Gerät des Nutzers ist laut Typ-/Produktunterlage der **WISI OR S2D** (DVB-S2 Free-To-Air SAT Dongle). In früheren Notizen und im ursprünglichen Projektnamen wurde es ungenau als „WISI O2D“ bezeichnet. OR S2D nicht mit anderen O2D-/Tivizen-/TiViCon-Geräten gleichsetzen: Protokollbeobachtungen in diesem Repository beziehen sich auf die jeweils aufgezeichneten Netzwerk-Mitschnitte.
+>
+> **Ziel:** Das proprietäre Streaming-Protokoll des WISI-Dongles zu untersuchen und eine eigene Anwendung zu bauen, die ihn über das Netzwerk anspricht und DVB-Livestreams abruft – ohne die originale TV2Smart-App.
 
 ---
 
@@ -8,38 +10,72 @@
 
 ```bash
 # Verbinden + Kanalauswahl + Stream
-python3 src/wisi_menu.py --ip 192.168.178.32
+python3 src/wisi_client.py --ip 192.168.178.32
 
 # Mit Debug-Ausgabe (zeigt alle Roh-Bytes)
-python3 src/wisi_menu.py --ip 192.168.178.32 --debug
+python3 src/wisi_client.py --ip 192.168.178.32 --debug
 
 # Stream direkt in VLC pipen
-python3 src/wisi_menu.py --ip 192.168.178.32 --stream --prog 4914 --output - | vlc -
+python3 src/wisi_client.py --ip 192.168.178.32 --stream --pat-idx 4 --output - | vlc -
 ```
 
-`src/wisi_menu.py` ist der **einzige aktive Client**. Dateien in `archive/` sind alte Experimente.
+`src/wisi_client.py` ist der aktive Client. `src/wisi_menu.py` leitet ältere Aufrufe
+als Kompatibilitätseinstieg dorthin weiter. Dateien in `archive/` sind alte Experimente.
+
+## Gerät und Schnittstellen
+
+Das hier identifizierte Modell ist der **WISI OR S2D**, ein DVB-S2-Free-To-Air-SAT-Dongle.
+Das offizielle [Produktdatenblatt](https://wisi.at/daten/artikel/pdf/Pro_OR-S2D_de.pdf)
+nennt USB-C für **PC/Firmwareupdate** und Ethernet (100 MBit/s); TV-Programme werden
+laut Datenblatt über das Heimnetzwerk (LAN oder WLAN) an Endgeräte übertragen.
+
+Die [OR-S2D-Bedienungsanleitung](https://wisi.at/daten/artikel/pdf/BDA_ORS2D_Dongle.pdf)
+beschreibt USB für Firmware-Upgrade beziehungsweise eine direkte Verbindung zu einer
+Android-TV-Box. Bei dieser direkten USB-Verbindung wird laut Anleitung die
+Netzwerkfunktion deaktiviert. Das belegt keine Plug-and-play-TV-Verbindung zu einem
+beliebigen Android-Tablet und dokumentiert auch kein PC-Flashprogramm.
+
+Die Anleitung nennt zwei Firmwarewege in TV2Smart: **Dongle Online Upgrade** sowie
+Firmware von einem USB-Speicherstick, den eine Android-TV-Box ausliest. Während eines
+Upgrades sollen Dongle und Box eingeschaltet und verbunden bleiben, bis TV2Smart neu
+gestartet wurde. Öffentlich zugängliche Unterlagen beschreiben weder ein PC-Update-Tool
+noch den erforderlichen PC-Treiber, ein Firmwarepaket zum manuellen Flashen oder
+Dateisystem/-namen für den USB-Stick. Deshalb keine beliebigen Flash-Tools oder
+Firmwaredateien verwenden. Details und Quellen: [research/or_s2d_firmware_update.md](research/or_s2d_firmware_update.md).
 
 ---
 
 ## Ordnerstruktur
 
 ```
-wisi-o2d-client/
+.
 ├── src/
-│   └── wisi_menu.py                      ← aktiver Client (hier arbeiten)
+│   ├── wisi_client.py                    # Aktiver Netzwerk-Client
+│   └── wisi_menu.py                      # Legacy-Einstieg; leitet an wisi_client.py weiter
 ├── archive/
-│   ├── wisi_dongle_client.py             ← alte Version v4 (Referenz)
-│   ├── wisi_dongle_v1.py                 ← alte Version v1 (Referenz)
-│   └── wisi_dongle_simple.py             ← minimaler PoC (Referenz)
+│   ├── wisi_dongle_client.py             # Ältere Version v4 (Referenz)
+│   ├── wisi_dongle_v1.py                 # Ältere Version v1 (Referenz)
+│   └── wisi_dongle_simple.py             # Minimaler Proof of Concept
 ├── research/
-│   ├── pcap_analysis.md                  ← vollständige Protokollanalyse ★
-│   ├── deep_research_with_pcap.md        ← ältere Analyse
-│   ├── deep_research_without_pcap.md
-│   ├── protocol_analysis_chatgpt.md
-│   ├── script_output_example.txt
-│   └── capture_pcapdroid_2026-10-11.pcap ← PCAP-Mitschnitt (10 MB)
+│   ├── or_s2d_firmware_update.md         # OR S2D: Modell, USB-C, Firmware-Update
+│   ├── pcap_analysis.md                  # Protokollanalyse der Mitschnitte
+│   ├── apk_reverse_engineering.md        # TV2Smart-APK-Analyse
+│   ├── protocol_analysis_chatgpt.md      # Protokollnotizen
+│   ├── deep_research_gemini.md           # Ältere Recherche, mit Modellhinweis
+│   ├── deep_research_with_pcap.md        # Frühere PCAP-Analyse
+│   ├── deep_research_without_pcap.md     # Frühere Analyse ohne PCAP
+│   ├── script_output_example.txt         # Beispielausgabe
+│   └── capture_pcapdroid_2026-10-11.pcap # Früherer PCAP-Mitschnitt
+├── PCAPdroid_12_Okt._16_16_04.pcap       # Nutzer-PCAP: App öffnen/schließen
+├── PCAPdroid_12_Okt._16_28_17.pcap       # Nutzer-PCAP: Streamablauf
+├── pyproject.toml                        # Python-Projekt-/Tool-Konfiguration
 └── README.md
 ```
+
+`.venv/` (lokale virtuelle Umgebung) und `.git/` (Versionsverwaltung) sind
+absichtlich nicht als Projektinhalte aufgeführt. PCAP-Dateien können private
+Netzwerkdetails enthalten; Mitschnitte vor dem Veröffentlichen prüfen und bei Bedarf
+aus der Versionsverwaltung heraushalten.
 
 ---
 

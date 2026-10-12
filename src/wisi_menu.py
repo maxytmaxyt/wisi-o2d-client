@@ -1,21 +1,11 @@
-# DEPRECATED – siehe src/wisi_client.py für die korrigierte Version
+# Kompatibilitätseinstieg – der aktive Client ist src/wisi_client.py.
 # Bekannte Bugs: falsches _cmd_prepare-Payload, gemischtes USBS-Lesen,
 #                zu spätes UDP-Bind, hartcodierter pat_index
-# Diese Datei bleibt als Referenz erhalten.
+# Die alte Implementierung bleibt als Referenz erhalten.
 
 """
-WISI / Tivizen / TiViCon DVB-over-IP  –  Interaktiver Client
-=============================================================
-
-Implementiert den vollständigen, aus PCAP verifizierten Ablauf:
-
-  Phase 1: TCP Init      (0x16 + 0x17)
-  Phase 2: EPG laden     (0x30/0x31 für alle Kanäle)
-  Phase 3: Kanalwahl     (0x03 + 0x32/0x33 + 0x02 Signal-Poll)
-  Phase 4: Tune          (0x01 → 0xF8/0x07 → UDP 0xF9/0x01 → 0x17)
-  Phase 5: Stream        (UDP 0xF9/0x01 Pull-Loop + TCP Keep-Alive)
-
-Protokoll-Referenz: research/pcap_analysis.md
+Legacy-Implementierung des DVB-over-IP-Clients für das hier als WISI OR S2D identifizierte Gerät.
+Beim direkten Start wird an src/wisi_client.py weitergeleitet.
 """
 
 import argparse
@@ -434,7 +424,7 @@ KNOWN_CHANNELS[4914]._pat_index = 4  # type: ignore[attr-defined]
 # ---------------------------------------------------------------------------
 MENU = """
 ╔══════════════════════════════════════════════╗
-║      WISI O2D  –  DVB-over-IP Client        ║
+║      WISI OR S2D  –  DVB-over-IP Client    ║
 ╠══════════════════════════════════════════════╣
 ║  [1]  EPG laden + Kanal wählen              ║
 ║  [2]  Stream starten (bekannte Kanäle)      ║
@@ -526,38 +516,10 @@ def main_menu(sock: socket.socket, ip: str) -> None:
 # CLI-Direktmodus
 # ---------------------------------------------------------------------------
 def main() -> None:
-    p = argparse.ArgumentParser(
-        description="WISI O2D DVB-over-IP Client",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument("--ip",     default=DEFAULT_IP,  help="Dongle-IP")
-    p.add_argument("--debug",  action="store_true",  help="Debug-Logging")
-    p.add_argument("--stream", action="store_true",  help="Direkt streamen (kein Menü)")
-    p.add_argument("--prog",   type=int, default=4914, help="Programm-Nummer (s_id) für --stream")
-    p.add_argument("--output", default="stream.ts",   help="Ausgabedatei oder - für stdout")
-    p.add_argument("--duration", type=float, default=0.0, help="Stream-Dauer in Sekunden (0=unbegrenzt)")
-    args = p.parse_args()
+    """Leitet alte Aufrufe an den korrigierten Client weiter."""
+    from wisi_client import main as current_main
 
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    sock = connect(args.ip)
-    if sock is None:
-        sys.exit(1)
-    log.info("✓ Dongle unter %s bereit.", args.ip)
-
-    if args.stream:
-        # Direktmodus: bekannten Kanal nutzen oder per prog suchen
-        ch = KNOWN_CHANNELS.get(args.prog)
-        if ch is None:
-            log.error("Programm %d nicht bekannt. Nutze --prog 4914 oder starte ohne --stream.", args.prog)
-            disconnect(sock)
-            sys.exit(1)
-        prepare_channel(sock, ch)
-        stream(sock, ch, args.output, args.duration)
-        disconnect(sock)
-    else:
-        main_menu(sock, args.ip)
+    current_main()
 
 if __name__ == "__main__":
     main()

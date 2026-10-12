@@ -5,6 +5,16 @@
 
 ---
 
+## Modellhinweis: OR S2D statt der früheren Bezeichnung O2D
+
+Der Nutzer hat das in diesem Projekt verwendete Gerät anhand des offiziellen
+[WISI-Produktdatenblatts](https://wisi.at/daten/artikel/pdf/Pro_OR-S2D_de.pdf) als
+**WISI OR S2D (DVB-S2 Free-To-Air SAT Dongle)** identifiziert. Frühere Notizen
+verwendeten „WISI O2D“ ungenau als Gerätenamen. Die Tabelle unten ist eine frühere
+allgemeine Recherche und kein Nachweis, dass alle dort genannten Produkte dasselbe
+Gerät oder dieselbe Hardware-/Firmwarevariante verwenden. Die belegten OR-S2D-
+USB- und Firmwareangaben stehen in [or_s2d_firmware_update.md](or_s2d_firmware_update.md).
+
 ## 1. USBC/APIX-Steuerprotokoll – Hardware-Herkunft
 
 ### Protokoll-Basis
@@ -17,7 +27,7 @@ Paketlänge 31 Byte = exakte USB-BOT-Spezifikation (USB Implementers Forum).
 |--------|------|------|--------------|
 | 0x00–0x03 | dCBWSignature | `55 53 42 43` | ASCII "USBC" – USB-BOT-Standard |
 | 0x04–0x07 | dCBWTag | `A0 CB 03 37` | Statischer Magic-Header / Transaktions-ID |
-| 0x08–0x0B | dCBWDataTransferLength | 32-Bit **Little-Endian** | Erwartete Rückgabelänge (**KORREKTUR: Little-Endian, nicht Big-Endian!**) |
+| 0x08–0x0B | dCBWDataTransferLength | 32-Bit **Big-Endian** | In aktuellen App-PCAPs bytegenau bestätigt |
 | 0x0C | bmCBWFlags | `0x80` / `0x00` | 0x80 = Device→Host (Lesen), 0x00 = Host→Device (Schreiben) |
 | 0x0D | bCBWLUN | `0x00` | Logical Unit Number |
 | 0x0E | bCBWCBLength | `0x0A`–`0x10` | Effektive CDB-Länge (10–16 Byte) |
@@ -25,8 +35,7 @@ Paketlänge 31 Byte = exakte USB-BOT-Spezifikation (USB Implementers Forum).
 | 0x13 | CDB[4] | Opcode | APIX-Befehlscode |
 | 0x14–0x1E | CDB[5..15] | Payload | Befehlsspezifische Parameter + Null-Padding |
 
-> ⚠️ **KORREKTUR**: `dCBWDataTransferLength` ist laut USB-BOT-Spec **Little-Endian**, nicht Big-Endian wie bisher angenommen!  
-> Muss im Client geprüft werden – PCAP-Rohbytes ggf. neu interpretieren.
+> **Korrektur durch den App-PCAP vom 12.10.2026:** Das APIX-Längenfeld ist Big-Endian. Im Mitschnitt stehen beispielsweise `00 00 00 04` für 4 Byte, `00 00 00 02` für 2 Byte und `00 00 BC 00` für `0xBC00`. Das APIX-Transportformat weicht hier vom nativen USB-BOT-CBW ab.
 
 ### Hardware-Hersteller: icube Corp. (Südkorea)
 
@@ -190,7 +199,7 @@ Deutsche Kabelnetze nutzen auf SD-Transpondern weiterhin **MP2-Audio** (192–25
 
 | Punkt | Bisherige Annahme | Korrektur durch Deep Research |
 |-------|-------------------|-------------------------------|
-| `dCBWDataTransferLength` Byte-Order | Big-Endian | **Little-Endian** (USB-BOT-Spec) – prüfen! |
+| `dCBWDataTransferLength` Byte-Order | Little-Endian laut früherer Annahme | **Big-Endian**, im App-PCAP bytegenau bestätigt |
 | 0xF9/0x0A Inhalt | "EPG/Metadaten unbekannt" | **Vorkompilierte Service-DB** (C-Struct-Array) |
 | 0xF9/0x0A + 0xF9/0x01 Header | Kein Header bekannt | **28-Byte-Präfix verwerfen**, Rest = Nutzdaten |
 | PAT-Index Herkunft | "Schätzung aus PAT" | **Direkt aus 0xF9/0x0A-Block lesbar** (Feld im Datensatz) |
@@ -202,7 +211,7 @@ Deutsche Kabelnetze nutzen auf SD-Transpondern weiterhin **MP2-Audio** (192–25
 ## 7. Nächste Implementierungsschritte (Priorität)
 
 - [ ] **0xF9/0x0A-Block parsen**: 28-Byte-Header überspringen, Datensatzlänge bestimmen (128 oder 256 Byte durch Trial), Kanalliste + PAT-Indizes extrahieren
-- [ ] **`dCBWDataTransferLength` Little-Endian prüfen**: PCAP-Rohbytes bei 0xBC00 → als LE = 0x00BC00 = 48128? Oder bleibt BE?
+- [x] **`dCBWDataTransferLength` Byte-Order**: Big-Endian, im App-PCAP bytegenau bestätigt.
 - [ ] **28-Byte-Header von 0xF9/0x01 verwerfen**: Bisheriger Code schreibt alle Bytes inkl. Header in die TS-Datei
 - [ ] **Kanalwechsel testen**: `_cmd_tune(pat_index=0)` bis `pat_index=5`, PAT-PID (0x0000) im TS lesen
 - [ ] **`apixd`-Daemon-Binary aus Firmware-Update extrahieren** (falls WISI/Tivizen Firmware-Image verfügbar)

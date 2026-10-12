@@ -10,7 +10,7 @@ Protokoll-Referenz:
   - 0xF9/0x0A-Block wird jetzt geparst: 28-Byte-Header verworfen,
     Datensätze (128B) extrahieren Kanalliste + PAT-Index direkt
   - 0xF9/0x01-Stream: 28-Byte-Header wird verworfen, nur reiner MPEG-TS geschrieben
-  - dCBWDataTransferLength: laut USB-BOT-Spec Little-Endian (verifiziert aus PCAP)
+  - dCBWDataTransferLength: Big-Endian, verifiziert gegen den neuen App-PCAP
   - Kanalliste wird aus 0xF9/0x0A gebaut (kein EPG-TCP-Scan mehr nötig)
   - Kanalwechsel per verifiziertem PAT-Index aus Service-DB
   - Daemon-Hintergrund: icube Corp. apixd (Seoul, KR)
@@ -47,6 +47,7 @@ CONNECT_TIMEOUT = 5.0
 RECV_TIMEOUT    = 4.0
 KEEPALIVE_INTVL = 2.0
 SIGNAL_INTVL    = 3.0
+UDP_PULL_INTVL  = 0.5
 
 # UDP-Block: 32.740 Byte = 28 Byte Header + 174 × 188 Byte TS
 UDP_RESPONSE_SIZE = 32_740
@@ -54,9 +55,8 @@ UDP_HEADER_SIZE   = 28        # Diese Bytes am Anfang jedes 0xF9-Blocks verwerfe
 UDP_TS_SIZE       = 32_712    # 174 × 188 Byte reiner MPEG-TS
 UDP_REQUEST_LEN   = 0xBC00    # 48128 – Anforderungsgröße im USBC-datalen-Feld
 
-# dCBWDataTransferLength: USB-BOT-Spec sagt Little-Endian
-# Aus PCAP: 0xBC00 steht als "00 BC 00 00" → bestätigt Little-Endian
-CBW_LEN_FORMAT = "<I"   # Little-Endian uint32
+# APIX serialisiert das Längenfeld Big-Endian, anders als ein natives USB-BOT-CBW.
+CBW_LEN_FORMAT = ">I"
 
 TS_PKT_SIZE = 188
 TS_SYNC     = 0x47
@@ -129,12 +129,12 @@ def _build_usbc(data_len: int, flags: int, prefix: int,
                 opcode: int, payload: bytes = b"") -> bytes:
     """
     31-Byte USBC Command Block (USB Bulk-Only Transport CBW).
-    data_len wird als Little-Endian kodiert (USB-BOT-Spec).
+    data_len wird im APIX-Protokoll als Big-Endian kodiert.
     """
     cdb = (bytes([prefix]) + b"APIX" + bytes([opcode]) + payload).ljust(16, b"\x00")
     assert len(cdb) == 16
     return (b"USBC" + MAGIC_TAG
-            + struct.pack(CBW_LEN_FORMAT, data_len)   # Little-Endian!
+            + struct.pack(CBW_LEN_FORMAT, data_len)
             + bytes([flags, 0x00, 0x10])
             + cdb)
 
@@ -154,7 +154,7 @@ def _cmd_epg_data(prog_idx: int, offset: int, length: int) -> bytes:
                        struct.pack(">I", prog_idx) + struct.pack(">H", offset))
 
 def _cmd_prepare(prog_idx: int) -> bytes:
-    return _build_usbc(4, 0x00, 0xF6, 0x03,
+    return _build_usbc(4, 0x80, 0xF6, 0x03,
                        b"\x00\x00\x00\x02" + struct.pack(">I", prog_idx))
 
 def _cmd_chinfo_size(prog_idx: int) -> bytes:
@@ -165,7 +165,7 @@ def _cmd_chinfo_data(prog_idx: int, length: int) -> bytes:
 
 def _cmd_tune(pat_index: int) -> bytes:
     # Byte[0]=0x00 Flag, Byte[1]=PAT-Array-Index (0-basiert)
-    return _build_usbc(2, 0x00, 0xF6, 0x01,
+    return _build_usbc(2, 0x80, 0xF6, 0x01,
                        bytes([0x00, pat_index & 0xFF]))
 
 def _udp_init() -> bytes:
@@ -230,20 +230,20 @@ def connect(ip: str) -> Optional[socket.socket]:
     sock.settimeout(None)
 
     r = _send_recv(sock, _cmd_16(), 12, "0x16 init")
-    if len(r) < 2:
+    if len(r) < 3:
         log.error("0x16: keine Antwort"); sock.close(); return None
-    status = r[1]
-    log.info("0x16 status=0x%02X  gerät=%s", status, r[2:7].hex())
+    status = r[2]
+    log.info("0x16 status=0x%02X  gerät=%s", status, r[3:8].hex())
 
     r = _send_recv(sock, _cmd_17_init(), 4, "0x17 init")
-    log.info("0x17 flag=0x%02X", r[1] if len(r) > 1 else 0xFF)
+    log.info("0x17 flag=0x%02X", r[2] if len(r) > 2 else 0xFF)
 
     if status != 0x01:
         log.info("Warte auf Bereitschaft ...")
         for _ in range(10):
             time.sleep(0.5)
             r = _send_recv(sock, _cmd_16(), 12, "0x16 poll")
-            if len(r) >= 2 and r[1] == 0x01:
+            if len(r) >= 3 and r[2] == 0x01:
                 log.info("Dongle bereit.")
                 break
         else:
@@ -371,16 +371,16 @@ def enrich_with_epg(sock: socket.socket, lock: threading.Lock,
         with lock:
             r = _send_recv(sock, _cmd_epg_size(svc.prog_idx), 6,
                            f"0x30 sid={svc.service_id}")
-        if len(r) < 4:
+        if len(r) < 6:
             continue
-        size = struct.unpack(">I", r[:4])[0]
+        size = struct.unpack(">I", r[2:6])[0]
         if size == 0:
             continue
         with lock:
             r = _send_recv(sock, _cmd_epg_data(svc.prog_idx, 0, size), size,
                            f"0x31 sid={svc.service_id}")
         try:
-            root = ET.fromstring(r.decode("utf-8", errors="replace"))
+            root = ET.fromstring(r[2:2 + size].decode("utf-8", errors="replace"))
             evts = []
             for ch_el in root.findall("ch"):
                 for evt_el in ch_el.findall("evt"):
@@ -403,24 +403,24 @@ def enrich_with_epg(sock: socket.socket, lock: threading.Lock,
 def prepare_channel(sock: socket.socket, lock: threading.Lock,
                     svc: ServiceEntry) -> None:
     with lock:
-        _send_recv(sock, _cmd_prepare(svc.prog_idx), 0, "0x03 prepare")
+        _send_recv(sock, _cmd_prepare(svc.prog_idx), 4, "0x03 prepare")
     with lock:
         r = _send_recv(sock, _cmd_chinfo_size(svc.prog_idx), 6, "0x32 chinfo-size")
-    if len(r) >= 4:
-        ci_size = struct.unpack(">I", r[:4])[0]
+    if len(r) >= 6:
+        ci_size = struct.unpack(">I", r[2:6])[0]
         if ci_size > 0:
             with lock:
                 r = _send_recv(sock, _cmd_chinfo_data(svc.prog_idx, ci_size), ci_size,
                                "0x33 chinfo")
-            log.debug("ch_Info: %s", r.decode("utf-8", "replace")[:80])
+            log.debug("ch_Info: %s", r[2:2 + ci_size].decode("utf-8", "replace")[:80])
 
     for attempt in range(3):
         time.sleep(SIGNAL_INTVL)
         with lock:
             r = _send_recv(sock, _cmd_signal(), 17, f"0x02 signal [{attempt+1}/3]")
-        if len(r) >= 3:
-            log.info("Signal: Stärke=%d%%  Qualität=%d", r[1], r[2])
-            if r[1] >= 50:
+        if len(r) >= 5:
+            log.info("Signal: Stärke=%d%%  Qualität=%d", r[3], r[4])
+            if r[3] >= 50:
                 return
     log.warning("Signal schwach – weiter.")
 
@@ -430,7 +430,8 @@ def prepare_channel(sock: socket.socket, lock: threading.Lock,
 # ---------------------------------------------------------------------------
 def stream(tcp_sock: socket.socket, lock: threading.Lock,
            svc: ServiceEntry, output_path: str,
-           duration_s: float = 0.0) -> None:
+           duration_s: float = 0.0,
+           keepalive_active: bool = False) -> None:
     """
     Startet MPEG-TS-Pull-Stream.
     Verwirft den 28-Byte-Header jedes 0xF9/0x01-Antwortblocks.
@@ -438,15 +439,20 @@ def stream(tcp_sock: socket.socket, lock: threading.Lock,
     stop = threading.Event()
     dongle_ip = tcp_sock.getpeername()[0]
 
-    ka = threading.Thread(target=_keepalive_worker,
-                          args=(tcp_sock, lock, stop), daemon=True)
-    ka.start()
+    ka: Optional[threading.Thread] = None
+    if not keepalive_active:
+        ka = threading.Thread(target=_keepalive_worker,
+                              args=(tcp_sock, lock, stop), daemon=True)
+        ka.start()
+    stream_ka_stop: Optional[threading.Event] = None
+    stream_ka: Optional[threading.Thread] = None
+    stream_ka_sock: Optional[socket.socket] = None
 
     # UDP-Socket VOR Tune binden
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
-    udp.bind(("", UDP_PORT))
-    udp.settimeout(5.0)
+    udp.bind(("", 0))
+    udp.settimeout(0.1)
 
     try:
         # UDP Init
@@ -458,7 +464,7 @@ def stream(tcp_sock: socket.socket, lock: threading.Lock,
 
         # Tune (TCP)
         with lock:
-            _send_recv(tcp_sock, _cmd_tune(svc.pat_index), 0, "0x01 tune")
+            _send_recv(tcp_sock, _cmd_tune(svc.pat_index), 2, "0x01 tune")
         log.info("Tune: pat_index=%d  sid=%d  (%s)", svc.pat_index, svc.service_id, svc.name)
 
         # Stream-Freigabe (TCP)
@@ -471,7 +477,20 @@ def stream(tcp_sock: socket.socket, lock: threading.Lock,
         # Tune bestätigen (TCP)
         with lock:
             r = _send_recv(tcp_sock, _cmd_17_confirm(), 4, "0x17 confirm")
-        log.info("0x17 confirm: 0x%02X", r[1] if len(r) > 1 else 0xFF)
+        log.info("0x17 confirm: 0x%02X", r[2] if len(r) > 2 else 0xFF)
+
+        # The dongle closes the tuning connection after confirmation. Keep the
+        # stream alive on a separate control connection, as the app does.
+        stream_ka_sock = connect(dongle_ip)
+        if stream_ka_sock is None:
+            raise ConnectionError("Keep-Alive-Verbindung nach Tune fehlgeschlagen.")
+        stream_ka_stop = threading.Event()
+        stream_ka = threading.Thread(
+            target=_keepalive_worker,
+            args=(stream_ka_sock, threading.Lock(), stream_ka_stop),
+            daemon=True,
+        )
+        stream_ka.start()
 
         out = (open(output_path, "wb")
                if output_path != "-" else sys.stdout.buffer)
@@ -480,39 +499,63 @@ def stream(tcp_sock: socket.socket, lock: threading.Lock,
         t_start = time.monotonic()
         block_num = 0
         ts_bytes  = 0
+        pull_count = 1
+        next_pull = t_start + UDP_PULL_INTVL
+        last_packet_at = t_start
+        next_timeout_warning = t_start + 5.0
 
         try:
             while not stop.is_set():
-                udp.sendto(_udp_request_block(first=False), (dongle_ip, UDP_PORT))
+                now = time.monotonic()
+                if duration_s > 0 and now - t_start >= duration_s:
+                    log.info("Dauer %.0f s erreicht.", duration_s)
+                    break
+                if now >= next_pull:
+                    udp.sendto(_udp_request_block(first=False), (dongle_ip, UDP_PORT))
+                    pull_count += 1
+                    next_pull = now + UDP_PULL_INTVL
+                    log.debug("0xF9/0x01 Pull #%d gesendet", pull_count)
+
                 try:
                     data, _ = udp.recvfrom(65535)
                 except socket.timeout:
-                    log.warning("UDP-Timeout")
-                    break
+                    now = time.monotonic()
+                    if now >= next_timeout_warning and now - last_packet_at >= 5.0:
+                        log.warning("Seit 5 Sekunden keine UDP-Streamdaten; Pulls laufen weiter.")
+                        next_timeout_warning = now + 5.0
+                    continue
 
                 # USBS oder 0xF9/0x0A-Echo ignorieren
                 if data[:4] == b"USBS" or data[:2] == b"\xf9\x0a":
                     continue
 
-                # 28-Byte-Header verwerfen (NEU laut Deep Research)
-                if len(data) > UDP_HEADER_SIZE:
-                    ts_data = data[UDP_HEADER_SIZE:]
-                else:
-                    ts_data = data
+                # Locate an aligned MPEG-TS payload without assuming a fixed header.
+                sync_offset = data.find(bytes([TS_SYNC]))
+                while sync_offset >= 0:
+                    if (sync_offset + 3 * TS_PKT_SIZE < len(data)
+                            and all(data[sync_offset + i * TS_PKT_SIZE] == TS_SYNC
+                                    for i in range(4))):
+                        break
+                    sync_offset = data.find(bytes([TS_SYNC]), sync_offset + 1)
+                if sync_offset < 0:
+                    log.debug("Kein MPEG-TS-Sync in UDP-Datagramm (%d Byte) – verworfen",
+                              len(data))
+                    continue
+                ts_data = data[sync_offset:]
+                last_packet_at = time.monotonic()
+                next_timeout_warning = last_packet_at + 5.0
+                if block_num == 0:
+                    log.debug("Erstes Stream-Datagramm: %d Byte, TS-Offset %d",
+                              len(data), sync_offset)
 
-                # TS-Sync prüfen
-                if not ts_data or ts_data[0] != TS_SYNC:
-                    # Sync suchen
-                    idx = ts_data.find(bytes([TS_SYNC]))
-                    if idx == -1:
-                        log.debug("Kein TS-Sync – verworfen")
-                        continue
-                    ts_data = ts_data[idx:]
-
-                out.write(ts_data)
+                complete_len = len(ts_data) - len(ts_data) % TS_PKT_SIZE
+                if complete_len == 0:
+                    log.debug("UDP-Datagramm enthält keine vollständigen TS-Pakete")
+                    continue
+                out.write(ts_data[:complete_len])
                 out.flush()
                 block_num += 1
-                ts_bytes  += len(ts_data)
+                ts_bytes  += complete_len
 
                 if block_num % 50 == 0:
                     elapsed = time.monotonic() - t_start
@@ -520,21 +563,25 @@ def stream(tcp_sock: socket.socket, lock: threading.Lock,
                     log.info("Block %4d | %.1f MiB | %.0f KB/s",
                              block_num, ts_bytes / 1_048_576, kbps)
 
-                if duration_s > 0 and (time.monotonic() - t_start) >= duration_s:
-                    log.info("Dauer %.0f s erreicht.", duration_s)
-                    break
-
         except KeyboardInterrupt:
             print()
             log.info("Abgebrochen.")
         finally:
             if output_path != "-":
                 out.close()
-            log.info("Stream beendet. %d Blöcke, %.2f MiB", block_num, ts_bytes / 1_048_576)
+            log.info("Stream beendet. %d Blöcke, %d Pulls, %.2f MiB",
+                     block_num, pull_count, ts_bytes / 1_048_576)
 
     finally:
         stop.set()
-        ka.join(timeout=4.0)
+        if ka is not None:
+            ka.join(timeout=4.0)
+        if stream_ka_stop is not None:
+            stream_ka_stop.set()
+        if stream_ka is not None:
+            stream_ka.join(timeout=4.0)
+        if stream_ka_sock is not None:
+            disconnect(stream_ka_sock)
         udp.close()
 
 
@@ -555,7 +602,7 @@ _FALLBACK_SERVICE = ServiceEntry(
 # ---------------------------------------------------------------------------
 _MENU = """
 ╔════════════════════════════════════════════════════╗
-║       WISI O2D  –  DVB-over-IP Client v3          ║
+║      WISI OR S2D  –  DVB-over-IP Client v3       ║
 ╠════════════════════════════════════════════════════╣
 ║  [1]  Service-DB laden (0xF9/0x0A) + Kanal wählen║
 ║  [2]  EPG nachladen (TCP 0x30/0x31)               ║
@@ -572,7 +619,7 @@ def _pick_service(services: List[ServiceEntry]) -> Optional[ServiceEntry]:
     if not active:
         active = services
 
-    print(f"\n{\'Nr\':>4}  {\'PAT\':>4}  {\'sid\':>6}  {\'vpid\':>6}  {\'apid\':>6}  Name")
+    print(f"\n{'Nr':>4}  {'PAT':>4}  {'sid':>6}  {'vpid':>6}  {'apid':>6}  Name")
     print("-" * 70)
     for i, s in enumerate(active[:50], 1):
         lock = "🔒" if s.is_encrypted else "   "
@@ -593,6 +640,10 @@ def main_menu(sock: socket.socket, ip: str) -> None:
     services: List[ServiceEntry] = []
     selected: Optional[ServiceEntry] = None
     stop_epg  = threading.Event()
+    keepalive_stop = threading.Event()
+    keepalive = threading.Thread(
+        target=_keepalive_worker, args=(sock, lock, keepalive_stop), daemon=True)
+    keepalive.start()
 
     # UDP-Socket für Service-DB-Abfragen (wird wiederverwendet)
     udp_ctrl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -644,7 +695,7 @@ def main_menu(sock: socket.socket, ip: str) -> None:
                 dur = float(dur_str) if dur_str else 0.0
             except ValueError:
                 dur = 0.0
-            stream(sock, lock, selected, outfile, dur)
+            stream(sock, lock, selected, outfile, dur, keepalive_active=True)
 
         elif choice == "4":
             log.info("PAT-Index-Test (schickt 0x01 mit Index 0–5) ...")
@@ -655,20 +706,29 @@ def main_menu(sock: socket.socket, ip: str) -> None:
                 input("  Enter für nächsten Index ...")
 
         elif choice == "5":
+            keepalive_stop.set()
+            keepalive.join(timeout=4.0)
             udp_ctrl.close()
             disconnect(sock)
             time.sleep(0.5)
             new = connect(ip)
             if new is None:
-                log.error("Verbindung fehlgeschlagen."); return
+                log.error("Verbindung fehlgeschlagen.")
+                return
             sock = new
             lock = threading.Lock()
+            keepalive_stop = threading.Event()
+            keepalive = threading.Thread(
+                target=_keepalive_worker, args=(sock, lock, keepalive_stop), daemon=True)
+            keepalive.start()
             udp_ctrl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_ctrl.settimeout(3.0)
             print(_MENU)
         else:
             print("1–5 oder q.")
 
+    keepalive_stop.set()
+    keepalive.join(timeout=4.0)
     udp_ctrl.close()
     disconnect(sock)
 
@@ -678,7 +738,7 @@ def main_menu(sock: socket.socket, ip: str) -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="WISI O2D DVB-over-IP Client v3 (icube APIX)",
+        description="WISI OR S2D DVB-over-IP Client v3 (icube APIX)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--ip",       default=DEFAULT_IP)
@@ -698,21 +758,29 @@ def main() -> None:
     lock = threading.Lock()
 
     if args.stream:
+        keepalive_stop = threading.Event()
+        keepalive = threading.Thread(
+            target=_keepalive_worker, args=(sock, lock, keepalive_stop), daemon=True)
+        keepalive.start()
+
         # Service-DB laden um PAT-Index zu verifizieren
         udp_tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_tmp.settimeout(3.0)
-        services = fetch_service_db(udp_tmp, args.ip)
-        udp_tmp.close()
+        try:
+            services = fetch_service_db(udp_tmp, args.ip)
+            svc = next((s for s in services if s.pat_index == args.pat_idx), None)
+            if svc is None:
+                log.warning("PAT-Index %d nicht in Service-DB – nutze Fallback.", args.pat_idx)
+                svc = _FALLBACK_SERVICE
+                svc = ServiceEntry(**{**svc.__dict__, "pat_index": args.pat_idx})
 
-        svc = next((s for s in services if s.pat_index == args.pat_idx), None)
-        if svc is None:
-            log.warning("PAT-Index %d nicht in Service-DB – nutze Fallback.", args.pat_idx)
-            svc = _FALLBACK_SERVICE
-            svc = ServiceEntry(**{**svc.__dict__, "pat_index": args.pat_idx})
-
-        prepare_channel(sock, lock, svc)
-        stream(sock, lock, svc, args.output, args.duration)
-        disconnect(sock)
+            prepare_channel(sock, lock, svc)
+            stream(sock, lock, svc, args.output, args.duration, keepalive_active=True)
+        finally:
+            udp_tmp.close()
+            keepalive_stop.set()
+            keepalive.join(timeout=4.0)
+            disconnect(sock)
     else:
         main_menu(sock, args.ip)
 

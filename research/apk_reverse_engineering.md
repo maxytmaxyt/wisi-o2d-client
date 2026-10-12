@@ -260,6 +260,6 @@ Dieser Befehl entspricht wahrscheinlich unserem `0xF8/0x07` Stream-Freigabe-Befe
 - [ ] **0x01-Payload-Struktur** verifizieren: Enthält er neben PAT-Index auch VPid/APid? → Ghidra auf DEX
 - [ ] **CMD_CH_LIST_LENGTH / CMD_CH_LIST_DATA** – entspricht das dem `0xF9/0x0A`-Block oder einem eigenen TCP-Befehl?
 - [ ] **PIM-Protokoll**: Wie wird `pim_set_pmt_pid` + `pim_set_key` mit dem APIX-Protokoll kombiniert?
-- [ ] **DongleCommunicationManager**: Hat zwei Modi – `initNetworkDongleCommunication` (TCP/UDP) und `initUsbDongleCommunication` (direkt per USB) → Unterschied im Protokoll?
+- [ ] **DongleCommunicationManager**: Unterschied des internen Protokolls zwischen `initNetworkDongleCommunication` (TCP/UDP) und `initUsbDongleCommunication` weiter untersuchen. Für den konkret identifizierten WISI OR S2D beschreibt das Handbuch USB für Firmware-Upgrade beziehungsweise direkte Verbindung zu einer Android-TV-Box; bei direkter USB-Verbindung wird die Netzwerkfunktion deaktiviert. Das belegt keinen USB-Streamingmodus für beliebige Android-Tablets oder PCs. Siehe [OR-S2D-Update- und USB-Recherche](or_s2d_firmware_update.md).
 - [ ] **dongleUsbProtocol / dongleUsbProtocolVariant**: Welche Werte? Könnten die Protokoll-Version angeben
 - [ ] **dongleIsNewIPTVProtocolEnabled**: Anderes Protokoll für IPTV-Kanäle?
