@@ -392,8 +392,8 @@ def enrich_with_epg(sock: socket.socket, lock: threading.Lock,
                         dur=evt_el.get("dur", ""),
                     ))
             epg[svc.service_id] = evts
-        except ET.ParseError:
-            pass
+        except ET.ParseError as exc:
+            log.warning("EPG-XML für SID %d nicht lesbar: %s", svc.service_id, exc)
     return epg
 
 

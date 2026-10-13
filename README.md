@@ -9,18 +9,67 @@
 ## ▶ Schnellstart
 
 ```bash
-# Verbinden + Kanalauswahl + Stream
-python3 src/wisi_client.py --ip 192.168.178.32
+# Hilfe zum Überskript
+python src/wisi.py --help
 
-# Mit Debug-Ausgabe (zeigt alle Roh-Bytes)
-python3 src/wisi_client.py --ip 192.168.178.32 --debug
+# Senderliste anzeigen
+python src/wisi.py --ip 192.168.178.32 --channels
 
-# Stream direkt in VLC pipen
-python3 src/wisi_client.py --ip 192.168.178.32 --stream --pat-idx 4 --output - | vlc -
+# EPG abrufen und als epg.json speichern
+python src/wisi.py --ip 192.168.178.32 --epg
+
+# Stream speichern oder direkt an VLC weiterleiten
+python src/wisi.py --ip 192.168.178.32 --stream --pat-idx 4 --output stream.ts
+python src/wisi.py --ip 192.168.178.32 --stream --pat-idx 4 --output - | vlc -
 ```
 
-`src/wisi_client.py` ist der aktive Client. `src/wisi_menu.py` leitet ältere Aufrufe
-als Kompatibilitätseinstieg dorthin weiter. Dateien in `archive/` sind alte Experimente.
+`src/wisi.py` ist das gemeinsame Überskript. Die einzelnen Werkzeuge können auch
+direkt gestartet werden. Es werden nur die Python-Standardbibliothek und die im
+Repository vorhandenen Dateien benötigt. Für die installierbare Kommandozeile kann
+das Projekt mit `python -m pip install -e .` installiert werden; danach steht
+`wisi --help` zur Verfügung.
+
+### Befehle
+
+| Aufruf | Funktion |
+|--------|----------|
+| `python src/wisi.py --ip IP --channels` | Senderliste über UDP 8800 abrufen und dekodieren |
+| `python src/wisi.py --ip IP --epg` | EPG der Sender über TCP 8802 laden; Standardausgabe `epg.json` |
+| `python src/wisi.py --ip IP --epg --epg-limit 10 --epg-output epg.json` | EPG für die ersten 10 Sender laden |
+| `python src/wisi.py --ip IP --stream --pat-idx 4 --duration 60 --output stream.ts` | Stream für 60 Sekunden speichern |
+| `python src/wisi.py --ip IP --stream --output - \| vlc -` | Stream direkt an VLC weiterleiten |
+| `python src/wisi.py --discover` | Experimentelle TV2S-UDP-Gerätesuche versuchen |
+| `python src/wisi.py --pcap capture.pcap` | APIX-Befehle und erkannte Service-DB-Antworten analysieren |
+| `python src/wisi.py --pcap capture.pcap --pcap-extract service-db.bin` | Größte gefundene `0xF9/0x0A`-Antwort zusätzlich speichern |
+| `python src/wisi.py --decode-service-db service-db.bin` | Gespeicherten `0xF9/0x0A`-Rohblob dekodieren |
+| `python src/wisi.py --ip IP --probe-opcode 0x12` | Genau einen ausgewählten unbekannten Opcode senden |
+
+`--output -` gibt den Stream auf stdout aus; `--epg-output -` gibt EPG-JSON auf
+stdout aus. Das vollständige EPG kann bei vielen Sendern eine Weile dauern.
+Discovery und einige Bedeutungen aus
+[WICHTIG_NEUE_MÖGLICHKEITEN.md](./WICHTIG_NEUE_MÖGLICHKEITEN.md) sind Hypothesen und
+nicht durch die vorhandenen PCAPs bestätigt. Eine ausbleibende Discovery-Antwort
+bedeutet nicht, dass der Dongle offline ist; nutze dann die direkte IP-Adresse.
+Der Opcode-Probe sendet nur einen einzeln gewählten Opcode. Unbekannte Befehle
+können das Geräteverhalten beeinflussen; es gibt absichtlich keinen Opcode-Sweep.
+Die beiden PCAPs im Projektstamm enthalten `0xF9/0x0A`-Anfragen und kurze `USBS`-
+Antworten. Im älteren Mitschnitt unter `research/` gibt es 198 Antworten mit je
+32.740 Byte, deren Inhalt aber nur aus `F9 0A` und Nullbytes besteht; es wurden daraus
+keine Sender dekodiert. Das angenommene Datensatzlayout ist somit noch nicht durch
+Nutzdaten vom Dongle bestätigt. Vollständige Antwortblöcke lassen sich mit
+`--pcap-extract` speichern und mit `--decode-service-db` untersuchen.
+
+Die Werkzeuge sind auch einzeln startbar, zum Beispiel:
+
+```bash
+python src/wisi_channels.py --ip 192.168.178.32
+python src/wisi_epg.py --ip 192.168.178.32 --output epg.json
+python src/wisi_pcap.py capture.pcap
+python src/wisi_probe.py --ip 192.168.178.32 --probe-opcode 0x12
+```
+
+`src/wisi_client.py` enthält den APIX-Steuerungs- und Stream-Client.
+`src/wisi_menu.py` bleibt ein Legacy-Einstieg. Dateien in `archive/` sind alte Experimente.
 
 ## Gerät und Schnittstellen
 
@@ -50,8 +99,16 @@ Firmwaredateien verwenden. Details und Quellen: [research/or_s2d_firmware_update
 ```
 .
 ├── src/
-│   ├── wisi_client.py                    # Aktiver Netzwerk-Client
-│   └── wisi_menu.py                      # Legacy-Einstieg; leitet an wisi_client.py weiter
+│   ├── wisi.py                           # Überskript / gemeinsames CLI
+│   ├── wisi_client.py                    # APIX-Steuerung und MPEG-TS-Stream
+│   ├── wisi_channels.py                  # Senderliste anzeigen
+│   ├── wisi_common.py                    # Gemeinsame CLI-Helfer
+│   ├── wisi_discovery.py                 # Experimentelle TV2S-Discovery
+│   ├── wisi_epg.py                       # EPG als JSON speichern
+│   ├── wisi_pcap.py                      # PCAP/APIX-Analyse und Service-DB-Export
+│   ├── wisi_probe.py                     # Einzelnen Opcode gezielt testen
+│   ├── protocol.py                       # APIX-Builder und Netzwerk-Helfer
+│   └── wisi_menu.py                      # Legacy-Einstieg
 ├── archive/
 │   ├── wisi_dongle_client.py             # Ältere Version v4 (Referenz)
 │   ├── wisi_dongle_v1.py                 # Ältere Version v1 (Referenz)
@@ -59,15 +116,13 @@ Firmwaredateien verwenden. Details und Quellen: [research/or_s2d_firmware_update
 ├── research/
 │   ├── or_s2d_firmware_update.md         # OR S2D: Modell, USB-C, Firmware-Update
 │   ├── pcap_analysis.md                  # Protokollanalyse der Mitschnitte
-│   ├── apk_reverse_engineering.md        # TV2Smart-APK-Analyse
-│   ├── protocol_analysis_chatgpt.md      # Protokollnotizen
-│   ├── deep_research_gemini.md           # Ältere Recherche, mit Modellhinweis
-│   ├── deep_research_with_pcap.md        # Frühere PCAP-Analyse
-│   ├── deep_research_without_pcap.md     # Frühere Analyse ohne PCAP
-│   ├── script_output_example.txt         # Beispielausgabe
+│   ├── apk_reverse_engineering.md         # TV2Smart-APK-Analyse
+│   ├── protocol_spec_or_s2d.md             # Zusammengetragene Protokoll-Spezifikation
 │   └── capture_pcapdroid_2026-10-11.pcap # Früherer PCAP-Mitschnitt
 ├── PCAPdroid_12_Okt._16_16_04.pcap       # Nutzer-PCAP: App öffnen/schließen
 ├── PCAPdroid_12_Okt._16_28_17.pcap       # Nutzer-PCAP: Streamablauf
+├── tests/
+│   └── test_wisi_tools.py                 # Tests für Discovery und PCAP-Auswertung
 ├── pyproject.toml                        # Python-Projekt-/Tool-Konfiguration
 └── README.md
 ```
@@ -79,15 +134,19 @@ aus der Versionsverwaltung heraushalten.
 
 ---
 
-## Projekt-Roadmap
+## Umsetzungsstand der neuen Möglichkeiten
 
 | Schritt | Status | Beschreibung |
 |---------|--------|--------------|
-| **1** | ✅ Fertig | Dongle verbinden + Init-Handshake (0x16/0x17) |
-| **2** | ✅ Fertig | EPG laden, Kanalliste aufbauen, Kanal auswählen |
-| **3** | ✅ Fertig | MPEG-TS-Stream starten + in Datei/VLC schreiben |
-| **4** | 🔲 Offen | Kanalwechsel (0x01 Payload für andere Kanäle bestätigen) |
-| **5** | 🔲 Offen | Android-App oder Web-UI |
+| Service-Datenbank | ⚠️ Teilweise | Live-Anfrage und Decoder vorhanden; das angenommene Datensatzlayout ist mangels vollständiger Antwort noch nicht mit dem Dongle verifiziert |
+| EPG | ✅ Ergänzt | `0x30/0x31` für gefundene Sender abrufen und als JSON exportieren |
+| PCAP-Auswertung | ✅ Ergänzt | Klassisches PCAP (Ethernet oder Raw IPv4) nach APIX-Befehlen durchsuchen; falls vorhanden Service-DB-Antwort exportieren/dekodieren |
+| Überskript | ✅ Ergänzt | Ein Einstieg für Senderliste, EPG, Stream, Discovery, Opcode-Probe und PCAP |
+| Gerätesuche | ⚠️ Experimentell | TV2S-Broadcast-Format aus der Spezifikationsnotiz; noch nicht per Mitschnitt bestätigt |
+| Opcode-Scan | ⏸️ Nicht automatisiert | Nur ein einzelner, manuell angegebener Opcode kann getestet werden |
+| Authentifizierungsschlüssel | ⏸️ Nicht umgesetzt | Die beschriebene native Bibliothek liegt nicht im Repository; keine Schlüssel-Extraktion oder Token-Umgehung |
+| Scan-Modus | ⏸️ Unbekannt | Scan-Opcodes und Payloads sind nicht durch PCAP belegt |
+| Kanalwechsel | ⚠️ Teilweise | Streamen anhand eines Service-/PAT-Index ist vorhanden; `0x01` für weitere Kanäle noch nicht unabhängig bestätigt |
 
 ---
 
@@ -142,7 +201,7 @@ UDP 8800  – Stream-Kanal (aktiv: Client fordert jeden Block an)
 | Opcode | Funktion | Antwort |
 |--------|----------|---------|
 | `0x02` | Stream initialisieren (einmalig) | – |
-| `0x0A` | EPG-Metadaten per UDP anfordern (200×, pre-tune) | 32.740 Byte `F9 0A 00...` |
+| `0x0A` | UDP-Datenblock anfordern (in einem Mitschnitt 200×, pre-tune); Inhalt/Semantik unbestätigt | 32.740 Byte; im vorhandenen älteren Mitschnitt nach `F9 0A` nur Nullbytes |
 | `0x01` | **MPEG-TS-Block anfordern** | 32.740 Byte (174 × 188 Byte TS-Pakete) |
 
 ### Vollständiger Protokollablauf
@@ -233,5 +292,5 @@ Byte[3]     → Sequenz-Nummer innerhalb des Transponders
 - ✅ MPEG-TS-Inhalt: H.264 + MPEG-1 Audio, PAT/PMT ausgelesen
 - ✅ 252 Kanäle mit EPG auf ts_id=33079 identifiziert
 - 🔲 0x01-Payload für andere Kanäle (Index in PAT?) bestätigen
-- 🔲 0xF9/0x0A-Antwortformat (proprietäres Binär) dekodieren
+- ⚠️ `0xF9/0x0A`: PCAP-Decoder vorhanden, aber in 198 aufgezeichneten Antworten nur `F9 0A` + Nullbytes; noch kein Nutzdaten-/Service-Layout bestätigt
 - 🔲 Pay-TV / verschlüsselte Kanäle (0x48-prog_idx)
