@@ -46,6 +46,9 @@ das Projekt mit `python -m pip install -e .` installiert werden; danach steht
 
 `--output -` gibt den Stream auf stdout aus; `--epg-output -` gibt EPG-JSON auf
 stdout aus. Das vollständige EPG kann bei vielen Sendern eine Weile dauern.
+Die Befehle `--channels` und `--epg` initialisieren zunächst den TCP-Steuerkanal
+(`8802`) und fragen danach die Service-Datenbank über UDP (`8800`) ab.
+Ein erfolgreicher Ping bestätigt nur die IP-Erreichbarkeit, nicht diese Dienste.
 Discovery und einige Bedeutungen aus
 [WICHTIG_NEUE_MÖGLICHKEITEN.md](./WICHTIG_NEUE_MÖGLICHKEITEN.md) sind Hypothesen und
 nicht durch die vorhandenen PCAPs bestätigt. Eine ausbleibende Discovery-Antwort

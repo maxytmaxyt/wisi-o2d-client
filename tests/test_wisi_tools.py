@@ -6,9 +6,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import wisi_common
+import wisi_client
 from wisi_discovery import DISCOVERY_REQUEST, MAGIC, VERSION, build_request, parse_response
 from wisi_pcap import analyze
 
@@ -81,6 +84,70 @@ class PcapTests(unittest.TestCase):
         services = result["decoded_services"]
         self.assertEqual(services[0]["service_id"], 4914)
         self.assertEqual(services[0]["name"], "ZDF")
+
+
+class ServiceDatabaseTests(unittest.TestCase):
+    def test_load_services_initializes_tcp_before_udp_and_closes_resources(self) -> None:
+        events: list[str] = []
+        control = object()
+        udp = MagicMock()
+
+        class KeepaliveThread:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def start(self) -> None:
+                events.append("keepalive")
+
+            def join(self, timeout: float) -> None:
+                events.append("join")
+
+        def fake_connect(ip: str) -> object:
+            events.append("tcp")
+            return control
+
+        def fake_fetch(sock: object, ip: str) -> list[object]:
+            events.append("udp")
+            return []
+
+        with (
+            patch.object(wisi_common, "connect", side_effect=fake_connect),
+            patch.object(
+                wisi_common, "disconnect", side_effect=lambda sock: events.append("close-tcp")
+            ),
+            patch.object(wisi_common, "fetch_service_db", side_effect=fake_fetch),
+            patch.object(wisi_common.socket, "socket", return_value=udp),
+            patch.object(wisi_common.threading, "Thread", KeepaliveThread),
+        ):
+            with self.assertRaisesRegex(ConnectionError, "TCP-Handshake war erfolgreich"):
+                wisi_common.load_services("192.168.178.32")
+
+        self.assertEqual(events, ["tcp", "keepalive", "udp", "join", "close-tcp"])
+        udp.settimeout.assert_called_once_with(3.0)
+        udp.close.assert_called_once()
+
+    def test_fetch_retries_short_reply_and_accepts_decodable_database(self) -> None:
+        short_reply = (b"USBS" + bytes(9), ("192.168.178.32", 8800))
+        database_reply = (_service_db_blob(), ("192.168.178.32", 8800))
+
+        class DatagramSocket:
+            def __init__(self) -> None:
+                self.replies = iter((short_reply, database_reply))
+                self.requests = 0
+
+            def sendto(self, data: bytes, address: tuple[str, int]) -> None:
+                self.requests += 1
+
+            def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
+                return next(self.replies)
+
+        udp = DatagramSocket()
+        with patch.object(wisi_client.time, "sleep"):
+            services = wisi_client.fetch_service_db(udp, "192.168.178.32")
+
+        self.assertEqual(udp.requests, 2)
+        self.assertEqual(len(services), 1)
+        self.assertEqual(services[0].service_id, 4914)
 
 
 if __name__ == "__main__":

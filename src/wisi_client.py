@@ -341,19 +341,46 @@ def parse_service_db(data: bytes) -> List[ServiceEntry]:
 
 def fetch_service_db(udp: socket.socket, dongle_ip: str,
                      attempts: int = 5) -> List[ServiceEntry]:
-    """Holt die Service-DB via 0xF9/0x0A (mehrere Versuche)."""
+    """Holt und dekodiert die Service-DB via 0xF9/0x0A (mehrere Versuche)."""
     cmd = _udp_service_db()
     for attempt in range(attempts):
         udp.sendto(cmd, (dongle_ip, UDP_PORT))
         try:
-            data, _ = udp.recvfrom(65535)
-            if len(data) >= UDP_HEADER_SIZE + SERVICE_DB_HEADER:
-                log.info("Service-DB empfangen: %d Byte (Versuch %d)", len(data), attempt + 1)
-                return parse_service_db(data)
+            data, address = udp.recvfrom(65535)
+            if address[0] != dongle_ip:
+                log.warning("Ignoriere UDP-Antwort von unerwarteter IP %s.", address[0])
+                continue
+            if len(data) < UDP_HEADER_SIZE + SERVICE_DB_HEADER:
+                log.warning(
+                    "0xF9/0x0A-Antwort von %s zu kurz: %d Byte, Anfang=%s",
+                    address[0],
+                    len(data),
+                    data[:16].hex(" "),
+                )
+                continue
+            services = parse_service_db(data)
+            if services:
+                log.info(
+                    "Service-DB empfangen: %d Byte, %d Sender (Versuch %d)",
+                    len(data), len(services), attempt + 1,
+                )
+                return services
+            log.warning(
+                "0xF9/0x0A lieferte %d Byte, aber keine erkennbaren Sender "
+                "(Versuch %d, Anfang=%s).",
+                len(data),
+                attempt + 1,
+                data[:16].hex(" "),
+            )
         except socket.timeout:
             log.debug("0xF9/0x0A Timeout (Versuch %d/%d)", attempt + 1, attempts)
         time.sleep(0.5)
-    log.warning("Service-DB nicht empfangen – nutze leere Liste.")
+    log.warning(
+        "Service-DB nach %d Versuchen nicht dekodiert. Prüfe TCP-Initialisierung, "
+        "Dongle-Status/Sendersuchlauf und UDP-Port %d.",
+        attempts,
+        UDP_PORT,
+    )
     return []
 
 
