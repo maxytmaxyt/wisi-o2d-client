@@ -3,15 +3,15 @@ WISI / TiViCon OR S2D DVB-over-IP  –  Client v4
 =================================================
 
 Protokoll-Referenz:
-  research/pcap_analysis.md             – ursprüngliche PCAP-Analyse (O2D)
+  research/pcap_analysis.md             – ursprüngliche PCAP-Analyse (OR S2D / O2D)
   PCAPdroid_12_Okt._16_16_04.pcap      – neues OR S2D PCAP (Kanal-Liste)
   PCAPdroid_12_Okt._16_28_17.pcap      – neues OR S2D PCAP (Stream)
 
-Änderungen v4 gegenüber v3 (OR S2D statt O2D):
+Änderungen v4 gegenüber v3 (OR S2D):
   - USBC-Pakete sind 66 Byte (31B CBW + 35B Auth-Extension)
   - Auth-Extension: 00 00 00 01 07 20 21 00 00 <session_token 2B> TV2Smart 00×12 <CRC 4B>
   - Session-Token stammt aus 0x16-Antwort (Bytes [32:34])
-  - USBS-Trailer ist 46 Byte (nicht 13 wie beim O2D)
+  - USBS-Trailer ist 46 Byte (nicht 13 wie beim älteren O2D-Dongle)
   - Kanalliste via TCP: 0xF6/0x20 (Länge) + 0xF6/0x21 (XML <ch_List>)
   - 0xF9/0x0A UDP nicht mehr für Kanalliste benötigt
   - CRC-Feld wird mit Nullbytes belassen (Dongle prüft es scheinbar nicht)
