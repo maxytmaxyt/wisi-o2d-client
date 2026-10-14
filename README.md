@@ -9,11 +9,13 @@ Python-Client und Protokollanalyse für den **WISI OR S2D** (DVB-S2-Free-to-Air-
 ## Aktueller Stand auf einen Blick
 
 - **Kanalliste:** Im OR-S2D-Mitschnitt wurde eine XML-Kanalliste über TCP mit `0xF6/0x20` (Länge) und `0xF6/0x21` (Daten) beobachtet. Die analysierte Liste enthält **440 Sender: 303 TV, 137 Radio, 439 als FTA markiert**. Die XML-Antwort ist 61.348 Byte groß.
-- **USBC-Anfragen:** OR-S2D-Anfragen in den Mitschnitten sind 66 Byte lang: der 31-Byte-USBC-CBW plus eine 35-Byte-Erweiterung mit Versions-/App-Feldern und Session-Token.
-- **USBS-Antworten:** In den OR-S2D-Aufzeichnungen wird ein 46-Byte-USBS-Trailer verwendet. Das ältere Hilfsmodul `src/protocol.py` beschreibt dagegen noch den alten 31-Byte-/13-Byte-Ansatz und ist nicht die maßgebliche Implementierung für den OR S2D.
+- **USBC-Anfragen:** Die in den TCP-Abläufen analysierten Requests sind 66 Byte lang (31-Byte-CBW plus Erweiterung). Die UDP-`0xF9/0x0A`-Requests der PCAPs vom 12. Oktober sind 31 Byte lang.
+- **USBS-Antworten:** 46 Byte werden in der Protokollanalyse für bestimmte Antworten beschrieben. Die gespeicherten UDP-PCAPs vom 12. Oktober zeigen dagegen 13-Byte-`USBS`-Antworten; ein universelles Trailerformat ist damit nicht belegt.
 - **Stream:** Der Ablauf `0xF6/0x03` → `0xF6/0x01` → `0xF8/0x07` → UDP-Pulls mit `0xF9/0x01` ist im Stream-Mitschnitt zu sehen. Die Pull-Anfragen holen jeweils einen MPEG-TS-Block ab.
-- **`0xF9/0x0A`:** Nicht als OR-S2D-Kanalliste verwenden. Die Anfragen sind in den Mitschnitten weiterhin zu sehen, der Zweck ist aber ungeklärt. Die ältere UDP-Service-DB-Interpretation liefert keine bestätigten Senderdaten.
-- **Status:** Analyse und Client-Code sind vorhanden, aber nicht jede Funktion ist live gegen das Gerät erfolgreich end-to-end verifiziert. Bekannte Code-/Testabweichungen stehen unter [Offene Punkte](#offene-punkte--bekannte-einschränkungen).
+- **`0xF9/0x0A`:** Keine bestätigte OR-S2D-Kanalliste. Im PCAP vom 11. Oktober sind 198 Antworten zu je 32.740 Byte mit nur zwei Nicht-Null-Bytes enthalten; die beiden PCAPs vom 12. Oktober zeigen insgesamt drei 13-Byte-`USBS`-Antworten. Die am 13. Oktober gemeldeten 48.143 Byte liegen nicht als Rohdaten vor und sind nicht mit diesen PCAP-Antworten gleichzusetzen.
+- **Status:** Analyse und Client-Code sind vorhanden, aber nicht jede Funktion ist live gegen das Gerät erfolgreich end-to-end verifiziert. Offene Punkte und Implementierungsgrenzen stehen unter [Offene Punkte](#offene-punkte--bekannte-einschränkungen).
+
+Die Detailauswertung und eine Einordnung der Forschungsnotizen stehen in [research/README.md](research/README.md).
 
 ## Voraussetzungen und Installation
 
@@ -40,6 +42,12 @@ python -m pip install -e .
 ```
 
 Nach der Installation ist der CLI-Einstieg `wisi` verfügbar. Ohne Installation können die folgenden Beispiele direkt mit `python src/wisi.py` ausgeführt werden.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Schnellstart
 
@@ -129,7 +137,7 @@ Der in den Mitschnitten beobachtete Anfrageaufbau ist:
 | `51–61` | 11 Byte | Padding |
 | `62–65` | 4 Byte | CRC-Feld; Algorithmus und Prüfverhalten nicht abschließend geklärt |
 
-Die vollständige Anfrage ist somit **66 Byte** lang. Aktuell setzt der Client das CRC-Feld auf Nullbytes. Aus den bisherigen Mitschnitten allein folgt nicht, dass dies für alle Kommandos und Firmwareversionen zuverlässig akzeptiert wird.
+Die in den TCP-Abläufen analysierte Anfrage ist somit **66 Byte** lang. Die UDP-`0xF9/0x0A`-Requests in den PCAPs vom 12. Oktober sind dagegen 31 Byte lang; die dort sichtbaren UDP-Antworten sind 13 Byte. Paketgrößen müssen nach Transport und Mitschnitt unterschieden werden. Aktuell setzt der Client das CRC-Feld auf Nullbytes. Aus den bisherigen Mitschnitten allein folgt nicht, dass dies für alle Kommandos und Firmwareversionen zuverlässig akzeptiert wird.
 
 Die OR-S2D-Antworten werden in `research/or_s2d_protocol_analysis.md` als Nutzdaten mit anschließendem 46-Byte-USBS-Trailer beschrieben. Das genaue Framing muss beim Lesen aus TCP stets berücksichtigt werden: TCP ist ein Bytestrom und erhält keine Anwendungsnachrichtengrenzen.
 
@@ -211,6 +219,7 @@ In den neueren Mitschnitten treten außerdem `0xFA/0x00`, `0xFA/0x07` und `0xFA/
 │   ├── wisi_menu.py                       # Älterer/Legacy-Menüeinstieg
 │   └── protocol.py                        # Älterer 31-B-APIX-Helper; nicht mit OR-S2D-Builder verwechseln
 ├── research/
+│   ├── README.md                         # Zusammenfassung und Einordnung der Forschung
 │   ├── or_s2d_protocol_analysis.md        # Wichtigste Analyse der Mitschnitte vom 12. Oktober
 │   ├── pcap_analysis.md                   # Zusammengeführte Analyse-Notizen
 │   ├── protocol_spec_or_s2d.md            # Spezifikationsnotizen; einzelne Abschnitte sind Hypothesen
@@ -233,17 +242,16 @@ In den neueren Mitschnitten treten außerdem `0xFA/0x00`, `0xFA/0x07` und `0xFA/
 ## Offene Punkte & bekannte Einschränkungen
 
 1. **Session-Token-Framing prüfen.** `src/wisi_client.py` liest in `_send_recv()` Nutzdaten zusammen mit dem konfigurierten USBS-Trailer. `connect()` und weitere Aufrufstellen versuchen danach teilweise erneut, einen Trailer zu lesen. Da der erste Lesevorgang den Trailer bereits konsumieren kann, kann der zusätzliche Leseversuch blockieren oder den TCP-Bytestrom aus dem Takt bringen. Die Session-Token-Extraktion ist damit in der aktuellen Implementierung nicht zuverlässig belegt. Vor dem Bewerten von Auth-Problemen zuerst TCP-Framing, Trailer-Verantwortlichkeit und Token-Offset konsistent korrigieren.
-2. **Tests an den neuen Ablauf anpassen.** `tests/test_wisi_tools.py` enthält noch Tests für den früheren UDP-Service-DB-Pfad und patcht einen Import, den `wisi_common.py` im aktuellen TCP-Kanallistenpfad nicht mehr bereitstellt. `python -m unittest discover -s tests -v` ist im gelieferten Stand daher nicht vollständig grün.
-3. **EPG-CLI vervollständigen.** `connect()` gibt in `wisi_client.py` ein Tupel `(socket, session_token)` zurück; `src/wisi_epg.py` behandelt das Ergebnis aktuell an einer Stelle wie einen einzelnen Socket. Der `--epg`-Ablauf ist deshalb nicht als funktionierend dokumentiert.
-4. **TCP-Nachrichten robust lesen.** TCP kann Nutzdaten und Trailer auf beliebige Segmentgrenzen verteilen. Antwortlängen, Trailer und Timeouts müssen explizit und konsistent behandelt werden.
-5. **Live-Kanalliste und Stream wiederholen.** Die PCAPs belegen den App-Ablauf. Sie belegen nicht, dass jeder aktuelle Clientpfad, Token-Wert und PAT-Index ohne weitere Korrekturen live funktioniert.
-6. **`0xF9/0x0A`-Semantik und `0xF6/0x22` klären.** Beide Fragen bleiben offen; keine Spekulation als gesicherte Protokollfunktion dokumentieren.
-7. **Discovery verifizieren.** Die `0xFA`-APIX-Befehle und der experimentelle TV2S-JSON-UDP-Broadcast sind bislang nicht als derselbe Mechanismus belegt.
-8. **Pay-TV/CA nicht implementiert.** `prog_idx`-Werte mit `0x48`-Präfix werden in den Notizen verschlüsselten Kanälen zugeordnet. Die freie Senderliste und der freie MPEG-TS-Stream sind von einer autorisierten Entschlüsselung getrennt; CA-/Pay-TV-Funktionalität ist nicht Teil dieses Clients.
+2. **EPG-CLI vervollständigen.** `connect()` gibt in `wisi_client.py` ein Tupel `(socket, session_token)` zurück; `src/wisi_epg.py` behandelt das Ergebnis aktuell an einer Stelle wie einen einzelnen Socket. Der `--epg`-Ablauf ist deshalb nicht als funktionierend dokumentiert.
+3. **TCP-Nachrichten robust lesen.** TCP kann Nutzdaten und Trailer auf beliebige Segmentgrenzen verteilen. Antwortlängen, Trailer und Timeouts müssen explizit und konsistent behandelt werden.
+4. **Live-Kanalliste und Stream wiederholen.** Die PCAPs belegen den App-Ablauf. Sie belegen nicht, dass jeder aktuelle Clientpfad, Token-Wert und PAT-Index ohne weitere Korrekturen live funktioniert.
+5. **`0xF9/0x0A`-Semantik und `0xF6/0x22` klären.** Der Vergleich der gespeicherten PCAPs ist in [research/pcap_analysis.md](research/pcap_analysis.md) dokumentiert. Für die abweichenden 48.143 Byte fehlt weiterhin der Rohblob; `0xF6/0x22` bleibt ebenfalls offen.
+6. **Discovery verifizieren.** Die `0xFA`-APIX-Befehle und der experimentelle TV2S-JSON-UDP-Broadcast sind bislang nicht als derselbe Mechanismus belegt.
+7. **Pay-TV/CA nicht implementiert.** `prog_idx`-Werte mit `0x48`-Präfix werden in den Notizen verschlüsselten Kanälen zugeordnet. Die freie Senderliste und der freie MPEG-TS-Stream sind von einer autorisierten Entschlüsselung getrennt; CA-/Pay-TV-Funktionalität ist nicht Teil dieses Clients.
 
 ## Forschungsnotizen und Quellenreihenfolge
 
-Für den aktuellen OR-S2D-Stand zuerst die tatsächlichen Mitschnitte und danach `research/or_s2d_protocol_analysis.md` vergleichen. `research/pcap_analysis.md`, `research/protocol_spec_or_s2d.md`, `AGENTS.md` und `WICHTIG_NEUE_MÖGLICHKEITEN.md` enthalten teils ältere oder hypothetische Aussagen. Insbesondere Behauptungen über einen Auth-Key, CRC-Verhalten, Scan-Opcodes oder die Bedeutung von `0xF9/0x0A` gelten nicht als bestätigt, solange kein reproduzierbarer Mitschnitt oder unabhängiger Test sie stützt.
+Die Forschungsdateien sind in [research/README.md](research/README.md) zusammengefasst und nach Beleglage eingeordnet. Protokollhypothesen, insbesondere zu Authentifizierung, CRC, Scan-Opcodes und `0xF9/0x0A`, gelten nicht als bestätigt, solange kein reproduzierbarer Mitschnitt oder unabhängiger Test sie stützt.
 
 Gerätemodell und Firmware-Update-Hinweise:
 

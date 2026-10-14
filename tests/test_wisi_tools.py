@@ -87,10 +87,9 @@ class PcapTests(unittest.TestCase):
 
 
 class ServiceDatabaseTests(unittest.TestCase):
-    def test_load_services_initializes_tcp_before_udp_and_closes_resources(self) -> None:
+    def test_load_services_fetches_tcp_channel_list_and_closes_resources(self) -> None:
         events: list[str] = []
         control = object()
-        udp = MagicMock()
 
         class KeepaliveThread:
             def __init__(self, *args: object, **kwargs: object) -> None:
@@ -104,50 +103,46 @@ class ServiceDatabaseTests(unittest.TestCase):
 
         def fake_connect(ip: str) -> object:
             events.append("tcp")
-            return control
+            return control, b"\x12\x34"
 
-        def fake_fetch(sock: object, ip: str) -> list[object]:
-            events.append("udp")
-            return []
+        def fake_fetch(
+            sock: object, lock: object, session_token: bytes, timeout: float
+        ) -> list[wisi_client.Channel]:
+            events.append("channels")
+            return [wisi_client.Channel(
+                prog_idx=0x40B40089,
+                service_id=4914,
+                ts_id=33079,
+                freq=10744,
+                pol="H",
+                sym=22000,
+                lcn=1,
+                name="Testkanal",
+                fta=True,
+                ch_type="TV",
+            )]
 
         with (
             patch.object(wisi_common, "connect", side_effect=fake_connect),
             patch.object(
                 wisi_common, "disconnect", side_effect=lambda sock: events.append("close-tcp")
             ),
-            patch.object(wisi_common, "fetch_service_db", side_effect=fake_fetch),
-            patch.object(wisi_common.socket, "socket", return_value=udp),
+            patch.object(wisi_common, "fetch_channel_list", side_effect=fake_fetch),
             patch.object(wisi_common.threading, "Thread", KeepaliveThread),
         ):
-            with self.assertRaisesRegex(ConnectionError, "TCP-Handshake war erfolgreich"):
-                wisi_common.load_services("192.168.178.32")
+            services = wisi_common.load_services("192.168.178.32")
 
-        self.assertEqual(events, ["tcp", "keepalive", "udp", "join", "close-tcp"])
-        udp.settimeout.assert_called_once_with(3.0)
-        udp.close.assert_called_once()
-
-    def test_fetch_retries_short_reply_and_accepts_decodable_database(self) -> None:
-        short_reply = (b"USBS" + bytes(9), ("192.168.178.32", 8800))
-        database_reply = (_service_db_blob(), ("192.168.178.32", 8800))
-
-        class DatagramSocket:
-            def __init__(self) -> None:
-                self.replies = iter((short_reply, database_reply))
-                self.requests = 0
-
-            def sendto(self, data: bytes, address: tuple[str, int]) -> None:
-                self.requests += 1
-
-            def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
-                return next(self.replies)
-
-        udp = DatagramSocket()
-        with patch.object(wisi_client.time, "sleep"):
-            services = wisi_client.fetch_service_db(udp, "192.168.178.32")
-
-        self.assertEqual(udp.requests, 2)
+        self.assertEqual(events, ["tcp", "keepalive", "channels", "join", "close-tcp"])
         self.assertEqual(len(services), 1)
-        self.assertEqual(services[0].service_id, 4914)
+        self.assertEqual(services[0].name, "Testkanal")
+
+    def test_legacy_service_db_fetch_is_disabled(self) -> None:
+        udp = MagicMock()
+
+        services = wisi_client.fetch_service_db(udp, "192.168.178.32")
+
+        self.assertEqual(services, [])
+        udp.sendto.assert_not_called()
 
 
 if __name__ == "__main__":
