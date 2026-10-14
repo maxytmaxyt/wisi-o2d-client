@@ -1,0 +1,43 @@
+==============================================
+  APK/XAPK Analysis - CODECS.COM
+==============================================
+
+Date: 14.10.2026, 09:49:16
+File: TV2Smart_3.M20260803.0-rev-a14aeb377_APKPure.xapk
+
+Package: com.tivicon.tv2smart.mobile
+Version: 3.M20260803.0-rev-a14aeb377 (code 202608030)
+Min Android: Android 8.0 (API 26)
+Target: API 36 (API 36)
+
+Densities: anydpi, hdpi ~240dpi, xhdpi ~320dpi, mdpi ~160dpi, xxhdpi ~480dpi, xxxhdpi ~640dpi
+
+Google Play required: No - no Play licence check found
+
+Permissions (23):
+  FOREGROUND_SERVICE_MEDIA_PLAYBACK [OK]
+  INTERNET [OK]
+  ACCESS_NETWORK_STATE [OK]
+  READ_EXTERNAL_STORAGE [CA]
+  WRITE_EXTERNAL_STORAGE [CA]
+  REORDER_TASKS [OK]
+  WAKE_LOCK [OK]
+  WRITE_SYNC_SETTINGS [OK]
+  ACCESS_FINE_LOCATION [CA]
+  RECORD_AUDIO [CA]
+  READ_PHONE_STATE [DN]
+  FOREGROUND_SERVICE [OK]
+  USB_PERMISSION [OK]
+  FOREGROUND_SERVICE_CONNECTED_DEVICE [OK]
+  FOREGROUND_SERVICE [OK]
+  TRANSMIT_IR [OK]
+  ACCESS_WIFI_STATE [OK]
+  CHANGE_WIFI_MULTICAST_STATE [OK]
+  SYSTEM_ALERT_WINDOW [OK]
+  READ_LOGS [OK]
+  WRITE_EPG_DATA [OK]
+  READ_EPG_DATA [OK]
+  DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION [OK]
+
+Signature: v2/v3
+
