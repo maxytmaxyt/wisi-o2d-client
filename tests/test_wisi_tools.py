@@ -65,6 +65,44 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIsNone(parse_response(response[:-1]))
 
 
+class ProtocolFrameTests(unittest.TestCase):
+    def test_command_builder_matches_31_byte_apix_request(self) -> None:
+        request = wisi_client._cmd_16()
+
+        self.assertEqual(len(request), 31)
+        self.assertEqual(request[:8], b"USBC\xA0\xCB\x03\x37")
+        self.assertEqual(struct.unpack_from(">I", request, 8)[0], 12)
+        self.assertEqual(request[15:21], b"\xF6APIX\x16")
+
+    def test_send_recv_consumes_13_byte_usbs_suffix(self) -> None:
+        payload = b"response"
+        suffix = b"USBS\xA0\xCB\x03\x37\x00\x00\x00\x00\x40"
+
+        class ResponseSocket:
+            def __init__(self) -> None:
+                self.remaining = bytearray(payload + suffix)
+                self.sent = b""
+
+            def settimeout(self, timeout: float | None) -> None:
+                pass
+
+            def sendall(self, data: bytes) -> None:
+                self.sent += data
+
+            def recv(self, size: int) -> bytes:
+                chunk = bytes(self.remaining[:size])
+                del self.remaining[:size]
+                return chunk
+
+        response_socket = ResponseSocket()
+
+        result = wisi_client._send_recv(response_socket, b"request", len(payload))
+
+        self.assertEqual(result, payload)
+        self.assertEqual(response_socket.remaining, b"")
+        self.assertEqual(response_socket.sent, b"request")
+
+
 class PcapTests(unittest.TestCase):
     def test_extracts_apiX_request_and_decodes_service_db_response(self) -> None:
         command = b"USBC" + bytes(4) + struct.pack(">I", 0) + bytes((0x80, 0, 16))

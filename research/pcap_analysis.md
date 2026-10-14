@@ -12,13 +12,14 @@ Stand: 14. Oktober 2026. Die Zahlen wurden mit `src/wisi_pcap.py` und einer zus�
 
 Im Mitschnitt vom 11. Oktober beginnen die großen Antworten mit `f9 0a`; über die gesamten 32.740 Byte sind jeweils nur zwei Bytes ungleich null. Der Legacy-Service-DB-Parser dekodiert daraus null Einträge. Die Antworten der beiden Mitschnitte vom 12. Oktober sind kurze `USBS`-Antworten; dort ist kein großer `0xF9/0x0A`-Blob aufgezeichnet.
 
-Laut separat übermittelter Konsolenausgabe erhielt der Nutzer am 13. Oktober fünfmal eine 48.143-Byte-Antwort mit `f9 0a`-Präfix und Nullbytes am Anfang. Diese Größe und Antwortstruktur tauchen in keinem der drei gespeicherten Mitschnitte auf. Ohne Rohblob lässt sich weder der Unterschied erklären noch ein Datensatzlayout bestätigen.
+Laut separat übermittelter Konsolenausgabe erhielt der Nutzer am 13. Oktober fünfmal eine 48.143-Byte-Antwort mit `f9 0a`-Präfix und Nullbytes am Anfang. Diese Größe taucht in keinem gespeicherten Mitschnitt auf. Die APK-Analyse ordnet sie als Speedtest ein: `getSpeedTestMbps()` baut `0xF9/0x0A` mit 48.128 Byte Testdaten, fordert 48.130 Datenbytes an und berechnet den Durchsatz mit 48.128 Byte pro Antwort. Der SDK-Netzwerkempfänger liest weitere 13 Abschlussbytes: `48.130 + 13 = 48.143`. Das passt zur Konsolenausgabe und ist kein Senderdatenbank-Layout. Ohne Rohblob bleiben Füll- und Abschlussbytes ungeprüft.
 
 ## Weitere Beobachtungen
 
 - Die Kanallisten-Aufzeichnung vom 12. Oktober enthält `0xF6/0x20`, `0xF6/0x21` und `0xF6/0x22` über TCP/8802. Das XML wurde in einer separaten Analyse mit 440 Einträgen ausgewertet.
 - Der Stream-Mitschnitt enthält `0xF6/0x03`, `0xF6/0x32`, `0xF6/0x33`, `0xF6/0x01`, `0xF8/0x07` und `0xF9/0x01` sowie UDP-Streamverkehr.
 - Die UDP-`0xF9/0x0A`-Requests in den neueren Mitschnitten sind 31 Byte lang; die sichtbaren Antworten sind 13 Byte. Das allein widerlegt oder bestätigt keine anders gerahmten TCP-Kommandos.
+- Das APK-SDK erzeugt für `0xF9/0x0A` einen 31-Byte-USBC-Request und verwendet den Opcode im Speedtest. Das ordnet die 48.143-Byte-Antwort ein, ohne die abweichenden 32.740-Byte-PCAP-Antworten gleichzusetzen.
 
 ## Grenzen der Auswertung
 

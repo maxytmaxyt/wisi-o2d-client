@@ -7,15 +7,11 @@ Protokoll-Referenz:
   PCAPdroid_12_Okt._16_16_04.pcap      – neues OR S2D PCAP (Kanal-Liste)
   PCAPdroid_12_Okt._16_28_17.pcap      – neues OR S2D PCAP (Stream)
 
-Änderungen v4 gegenüber v3 (OR S2D):
-  - USBC-Pakete sind 66 Byte (31B CBW + 35B Auth-Extension)
-  - Auth-Extension: 00 00 00 01 07 20 21 00 00 <session_token 2B> TV2Smart 00×12 <CRC 4B>
-  - Session-Token stammt aus 0x16-Antwort (Bytes [32:34])
-  - USBS-Trailer ist 46 Byte (nicht 13 wie beim älteren O2D-Dongle)
-  - Kanalliste via TCP: 0xF6/0x20 (Länge) + 0xF6/0x21 (XML <ch_List>)
-  - 0xF9/0x0A UDP nicht mehr für Kanalliste benötigt
-  - CRC-Feld wird mit Nullbytes belassen (Dongle prüft es scheinbar nicht)
-  - Prefix für Discovery-Befehle: 0xFA statt 0xF8
+Verifizierter Framing-Stand:
+    - APK-SDK und PCAPs erzeugen 31-Byte-USBC-Grundrequests.
+    - Die untersuchten APIX-Antworten enden mit einem 13-Byte-USBS-Suffix.
+    - Die OR-S2D-Kanalliste läuft im PCAP über TCP 0xF6/0x20 und 0xF6/0x21.
+    - Das APK-SDK verwendet UDP 0xF9/0x0A für einen Speedtest, nicht als Senderliste.
 """
 
 from __future__ import annotations
@@ -51,21 +47,12 @@ KEEPALIVE_INTVL  = 2.0
 SIGNAL_INTVL     = 3.0
 UDP_PULL_INTVL   = 0.5
 
-# OR S2D USBC-Paketformat
+# USBC-Paketformat aus APK-SDK und Mitschnitten
 USBC_CBW_LEN     = 31    # Standard USB Bulk-Only CBW
-AUTH_EXT_LEN     = 35    # OR S2D Auth-Extension
-USBC_TOTAL_LEN   = 66    # = USBC_CBW_LEN + AUTH_EXT_LEN
+USBC_TOTAL_LEN   = USBC_CBW_LEN
 
-# OR S2D USBS-Trailer (response suffix): 46 Byte
-# (USBS 4B + magic 4B + status 4B + flags 1B + version 2B + session 2B + TV2Smart 8B + pad 12B + CRC 4B + …)
-USBS_LEN         = 46
-
-# Auth-Extension Konstanten (aus PCAP rückentwickelt)
-AUTH_MARKER      = b"\x00\x00\x00\x01"   # Byte[31:35]
-AUTH_VERSION     = b"\x07\x20\x21\x00"   # Byte[35:39]: Version 7.32.33
-AUTH_APP_NAME    = b"TV2Smart\x00\x00\x00\x00"  # Byte[42:54]: 12 Bytes
-AUTH_PAD         = b"\x00" * 8           # Byte[54:62]
-AUTH_CRC_ZERO    = b"\x00" * 4           # Byte[62:66]: CRC (wird nicht geprüft)
+# USBS response suffix observed in APIX TCP/UDP captures
+USBS_LEN         = 13
 
 # UDP-Stream
 UDP_REQUEST_LEN  = 0xBC00   # 48128
@@ -152,7 +139,7 @@ def channel_to_service(ch: Channel, idx: int) -> ServiceEntry:
 
 
 # ---------------------------------------------------------------------------
-# USBC-Builder (OR S2D: 66 Byte mit Auth-Extension)
+# USBC-Builder (31-Byte-CBW)
 # ---------------------------------------------------------------------------
 def _build_usbc(
     data_len: int,
@@ -163,17 +150,12 @@ def _build_usbc(
     session_token: bytes = b"\x00\x00",
 ) -> bytes:
     """
-    66-Byte USBC-Paket für den OR S2D:
-      [00:31]  Standard USBC CBW (31 Byte)
-      [31:66]  Auth-Extension (35 Byte):
-                [31:35]  00 00 00 01  (Protokoll-Marker)
-                [35:39]  07 20 21 00  (App-Version 7.32.33)
-                [39:41]  00 00        (Padding)
-                [41:43]  session_token (2 Byte)
-                [43:51]  TV2Smart\\0  (8 Byte App-Name)
-                [51:62]  00×11        (Padding)
-                [62:66]  00×4         (CRC, wird vom Dongle nicht geprüft)
+    31-Byte-USBC-CBW wie im APK-SDK und in den Mitschnitten.
+
+    `session_token` bleibt aus Kompatibilitätsgründen in der internen Signatur;
+    der belegte Request-Builder serialisiert keine Auth-Erweiterung.
     """
+    del session_token
     cdb = (
         bytes([prefix]) + b"APIX" + bytes([opcode]) + payload
     ).ljust(16, b"\x00")
@@ -188,18 +170,7 @@ def _build_usbc(
     )
     assert len(cbw) == USBC_CBW_LEN
 
-    auth = (
-        AUTH_MARKER          # [31:35]
-        + AUTH_VERSION       # [35:39]
-        + b"\x00\x00"       # [39:41] padding
-        + session_token[:2]  # [41:43]
-        + b"TV2Smart"       # [43:51]
-        + b"\x00" * 11      # [51:62] padding
-        + AUTH_CRC_ZERO     # [62:66]
-    )
-    assert len(auth) == AUTH_EXT_LEN
-
-    return cbw + auth
+    return cbw
 
 
 # Befehls-Builder
@@ -290,17 +261,6 @@ def _send_recv(sock: socket.socket, cmd: bytes,
     return payload
 
 
-def _extract_session_token(response: bytes) -> bytes:
-    """
-    Liest den Session-Token aus einer USBS-Antwort des OR S2D.
-    Position [32:34] der 58-Byte-Antwort auf 0x16.
-    Fallback: b"\\x00\\x00" wenn kein Token gefunden.
-    """
-    if len(response) >= 34:
-        return response[32:34]
-    return b"\x00\x00"
-
-
 # ---------------------------------------------------------------------------
 # Phase 1: Verbinden + Init
 # ---------------------------------------------------------------------------
@@ -329,23 +289,9 @@ def connect(ip: str) -> Optional[tuple[socket.socket, bytes]]:
     status = r[2]
     log.info("0x16 status=0x%02X  gerät=%s", status, r[3:8].hex())
 
-    # Session-Token aus erster Antwort extrahieren
-    # (der komplette TCP-Stream enthält das USBS-Suffix nach dem Payload)
+    # The observed 31-byte request/13-byte response framing has no session-token field.
     st = b"\x00\x00"
-    # Empfange etwas mehr um den USBS-Trailer zu erfassen
-    trailer = _recv_exactly(sock, USBS_LEN)
-    if len(trailer) >= 14:
-        # USBS trailer: USBS(4) + magic(4) + status(4) + flags(1) + ...
-        # Session-Token steht im Trailer ab Byte [20:22] relativ zum Trailer-Start
-        # = USBS(4)+magic(4)+status(4)+flags(1)+version_hi(1)+ver_lo(1)+??+session(2)
-        # Aus PCAP: after "USBS a0cb0337 00000000 40 00 01 07 20 21 00 00" -> 27 94
-        # = offset 20 within trailer
-        if len(trailer) >= 22:
-            st = trailer[20:22]
-            log.debug("Session-Token aus 0x16-Trailer: %s", st.hex())
-
     r17 = _send_recv(sock, _cmd_17_init(st), 4, "0x17 init")
-    _ = _recv_exactly(sock, USBS_LEN)  # Trailer lesen
     log.info("0x17 flag=0x%02X", r17[2] if len(r17) > 2 else 0xFF)
 
     if status != 0x01:
@@ -353,7 +299,6 @@ def connect(ip: str) -> Optional[tuple[socket.socket, bytes]]:
         for _ in range(10):
             time.sleep(0.5)
             r = _send_recv(sock, _cmd_16(st), 12, "0x16 poll")
-            _ = _recv_exactly(sock, USBS_LEN)
             if len(r) >= 3 and r[2] == 0x01:
                 log.info("Dongle bereit.")
                 break
@@ -437,7 +382,6 @@ def fetch_channel_list(
     # Schritt 1: Länge abfragen
     with lock:
         r = _send_recv(sock, _cmd_chlist_size(session_token), 8, "0xF6/0x20 ch_List_Size")
-        _ = _recv_exactly(sock, USBS_LEN)
 
     if len(r) < 4:
         log.warning("0xF6/0x20: Antwort zu kurz (%dB)", len(r))
@@ -558,23 +502,19 @@ def prepare_channel(
 ) -> None:
     with lock:
         _send_recv(sock, _cmd_prepare(svc.prog_idx, session_token), 4, "0x03 prepare")
-        _ = _recv_exactly(sock, USBS_LEN)
     with lock:
         r = _send_recv(sock, _cmd_chinfo_size(svc.prog_idx, session_token), 6, "0x32 chinfo-size")
-        _ = _recv_exactly(sock, USBS_LEN)
     if len(r) >= 6:
         ci_size = struct.unpack(">I", r[2:6])[0]
         if ci_size > 0:
             with lock:
                 r2 = _send_recv(sock, _cmd_chinfo_data(svc.prog_idx, ci_size, session_token), ci_size, "0x33 chinfo")
-                _ = _recv_exactly(sock, USBS_LEN)
             log.debug("ch_Info: %s", r2[:min(80, ci_size)].decode("utf-8", "replace"))
 
     for attempt in range(3):
         time.sleep(SIGNAL_INTVL)
         with lock:
             r = _send_recv(sock, _cmd_signal(session_token), 17, f"0x02 signal [{attempt+1}/3]")
-            _ = _recv_exactly(sock, USBS_LEN)
         if len(r) >= 5:
             log.info("Signal: Stärke=%d%%  Qualität=%d", r[3], r[4])
             if r[3] >= 50:
@@ -626,13 +566,11 @@ def stream(
         # Tune (TCP)
         with lock:
             _send_recv(tcp_sock, _cmd_tune(svc.pat_index, session_token), 2, "0x01 tune")
-            _ = _recv_exactly(tcp_sock, USBS_LEN)
         log.info("Tune: pat_index=%d  sid=%d  (%s)", svc.pat_index, svc.service_id, svc.name)
 
         # Stream-Freigabe (TCP)
         with lock:
             _send_recv(tcp_sock, _cmd_stream_release(session_token), 0, "0xF8/0x07 release")
-            _ = _recv_exactly(tcp_sock, USBS_LEN)
 
         # Erster UDP-Block
         udp.sendto(_udp_request_block(first=True, st=session_token), (dongle_ip, UDP_PORT))
@@ -640,7 +578,6 @@ def stream(
         # Tune bestätigen (TCP)
         with lock:
             r = _send_recv(tcp_sock, _cmd_17_confirm(session_token), 4, "0x17 confirm")
-            _ = _recv_exactly(tcp_sock, USBS_LEN)
         log.info("0x17 confirm: 0x%02X", r[2] if len(r) > 2 else 0xFF)
 
         # Keep-Alive-Verbindung nach Tune
@@ -893,7 +830,6 @@ def main_menu(sock: socket.socket, ip: str, session_token: bytes) -> None:
             for idx in range(6):
                 with lock:
                     _send_recv(sock, _cmd_tune(idx, session_token), 0, f"0x01 idx={idx}")
-                    _ = _recv_exactly(sock, USBS_LEN)
                 log.info("Index %d gesendet – jetzt UDP-Block prüfen", idx)
                 input("  Enter für nächsten Index ...")
 

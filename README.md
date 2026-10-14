@@ -2,17 +2,17 @@
 
 Python-Client und Protokollanalyse für den **WISI OR S2D** (DVB-S2-Free-to-Air-Satelliten-Dongle) auf Basis eigener PCAP-Mitschnitte und der Analyse der TV2Smart-App.
 
-> **Modell korrekt unterscheiden:** Dieses Repository beschreibt den WISI **OR S2D**. Ältere Notizen und Codeversionen verwenden teilweise „O2D“, „Tivizen“ oder „TiViCon“ als Sammelbezeichnung. Die OR-S2D-Mitschnitte zeigen jedoch Unterschiede zum älteren 31-Byte-APIX-Ansatz. Protokollverhalten sollte daher nicht ungeprüft von einem anderen Modell übertragen werden.
+> **Modell korrekt unterscheiden:** Dieses Repository beschreibt den WISI **OR S2D**. Ältere Notizen und Codeversionen verwenden teilweise „O2D“, „Tivizen“ oder „TiViCon“ als Sammelbezeichnung. Die Modelle verwenden zwar APIX-Grundframes ähnlicher Länge, aber Kommandobedeutungen und Abläufe dürfen nicht ungeprüft übertragen werden.
 
 **Stand der Dokumentation: 14. Oktober 2026.** Das Protokoll ist teilweise aus Mitschnitten abgeleitet. Ein beobachteter App-Ablauf ist nicht automatisch ein unabhängig funktionierender Client-Ablauf; die offenen Punkte und Implementierungsgrenzen sind unten dokumentiert.
 
 ## Aktueller Stand auf einen Blick
 
 - **Kanalliste:** Im OR-S2D-Mitschnitt wurde eine XML-Kanalliste über TCP mit `0xF6/0x20` (Länge) und `0xF6/0x21` (Daten) beobachtet. Die analysierte Liste enthält **440 Sender: 303 TV, 137 Radio, 439 als FTA markiert**. Die XML-Antwort ist 61.348 Byte groß.
-- **USBC-Anfragen:** Die in den TCP-Abläufen analysierten Requests sind 66 Byte lang (31-Byte-CBW plus Erweiterung). Die UDP-`0xF9/0x0A`-Requests der PCAPs vom 12. Oktober sind 31 Byte lang.
-- **USBS-Antworten:** 46 Byte werden in der Protokollanalyse für bestimmte Antworten beschrieben. Die gespeicherten UDP-PCAPs vom 12. Oktober zeigen dagegen 13-Byte-`USBS`-Antworten; ein universelles Trailerformat ist damit nicht belegt.
+- **USBC-Anfragen:** Der APK-Builder und die APIX-Requests in den vorhandenen Mitschnitten verwenden 31-Byte-CBWs. Eine 35-Byte-Auth-Erweiterung ist in diesen Artefakten nicht belegt.
+- **USBS-Antworten:** Die untersuchten TCP- und UDP-Antworten enden mit einem 13-Byte-`USBS`-Suffix. Ein 46-Byte-Trailer ist in den enthaltenen Artefakten nicht bestätigt.
 - **Stream:** Der Ablauf `0xF6/0x03` → `0xF6/0x01` → `0xF8/0x07` → UDP-Pulls mit `0xF9/0x01` ist im Stream-Mitschnitt zu sehen. Die Pull-Anfragen holen jeweils einen MPEG-TS-Block ab.
-- **`0xF9/0x0A`:** Keine bestätigte OR-S2D-Kanalliste. Im PCAP vom 11. Oktober sind 198 Antworten zu je 32.740 Byte mit nur zwei Nicht-Null-Bytes enthalten; die beiden PCAPs vom 12. Oktober zeigen insgesamt drei 13-Byte-`USBS`-Antworten. Die am 13. Oktober gemeldeten 48.143 Byte liegen nicht als Rohdaten vor und sind nicht mit diesen PCAP-Antworten gleichzusetzen.
+- **`0xF9/0x0A`:** Im hochgeladenen TV2Smart-APK-SDK als Speedtest belegt, nicht als Senderliste. Der APK-Code fordert 48.128 Testbytes an; 48.130 Datenbytes plus 13 Abschlussbytes ergeben exakt die gemeldeten 48.143 Byte. Die 32.740-Byte-PCAP-Antworten vom 11. Oktober bleiben ein getrenntes, nicht bytegenau erklärtes Muster.
 - **Status:** Analyse und Client-Code sind vorhanden, aber nicht jede Funktion ist live gegen das Gerät erfolgreich end-to-end verifiziert. Offene Punkte und Implementierungsgrenzen stehen unter [Offene Punkte](#offene-punkte--bekannte-einschränkungen).
 
 Die Detailauswertung und eine Einordnung der Forschungsnotizen stehen in [research/README.md](research/README.md).
@@ -65,7 +65,7 @@ Die bisherige Standard-IP in den Beispielen lautet `192.168.178.32`. Ersetze sie
 python src/wisi.py --ip 192.168.178.32 --channels
 ```
 
-Der aktuelle Pfad initialisiert TCP `8802` und fragt die XML-Kanalliste über `0xF6/0x20` und `0xF6/0x21` ab. Der Live-Erfolg hängt unter anderem davon ab, dass Session-Token-Handling und die Antwortgrenzen korrekt funktionieren; siehe bekannte Einschränkungen.
+Der aktuelle Pfad initialisiert TCP `8802` und fragt die XML-Kanalliste über `0xF6/0x20` und `0xF6/0x21` ab. Dieser Clientpfad ist weiterhin nicht end-to-end live verifiziert; offene Framing- und Laufzeitfragen stehen unten.
 
 ### Streamversuch starten
 
@@ -122,24 +122,19 @@ Unbekannte Opcodes nicht in einer automatisierten Schleife durchprobieren. Für 
 
 Die aktuellen OR-S2D-Erkenntnisse stammen vor allem aus den beiden Mitschnitten vom 12. Oktober 2026 und den vorangegangenen Analyseaufzeichnungen in `research/`.
 
-### 1. OR S2D verwendet eine erweiterte Anfrage
+### 1. Request-Framing in APK und Mitschnitten
 
-Der in den Mitschnitten beobachtete Anfrageaufbau ist:
+Der generische Builder im hochgeladenen APK-SDK und die `USBC`-Requests in den enthaltenen APIX-Mitschnitten verwenden diesen 31-Byte-CBW:
 
 | Offset | Länge | Inhalt |
 |---|---:|---|
 | `0–30` | 31 Byte | USBC-CBW: `USBC`, Magic `A0 CB 03 37`, Datenlänge, Flags, LUN, CDB-Länge und APIX-CDB |
-| `31–34` | 4 Byte | Erweiterungsmarker `00 00 00 01` |
-| `35–38` | 4 Byte | Versionsfeld `07 20 21 00` |
-| `39–40` | 2 Byte | Padding |
-| `41–42` | 2 Byte | Session-Token-Feld |
-| `43–50` | 8 Byte | App-Bezeichner `TV2Smart` |
-| `51–61` | 11 Byte | Padding |
-| `62–65` | 4 Byte | CRC-Feld; Algorithmus und Prüfverhalten nicht abschließend geklärt |
+| `15` | 1 Byte | APIX-Prefix |
+| `16–19` | 4 Byte | `APIX` |
+| `20` | 1 Byte | Opcode |
+| `21–30` | 10 Byte | CDB-Payload/Padding |
 
-Die in den TCP-Abläufen analysierte Anfrage ist somit **66 Byte** lang. Die UDP-`0xF9/0x0A`-Requests in den PCAPs vom 12. Oktober sind dagegen 31 Byte lang; die dort sichtbaren UDP-Antworten sind 13 Byte. Paketgrößen müssen nach Transport und Mitschnitt unterschieden werden. Aktuell setzt der Client das CRC-Feld auf Nullbytes. Aus den bisherigen Mitschnitten allein folgt nicht, dass dies für alle Kommandos und Firmwareversionen zuverlässig akzeptiert wird.
-
-Die OR-S2D-Antworten werden in `research/or_s2d_protocol_analysis.md` als Nutzdaten mit anschließendem 46-Byte-USBS-Trailer beschrieben. Das genaue Framing muss beim Lesen aus TCP stets berücksichtigt werden: TCP ist ein Bytestrom und erhält keine Anwendungsnachrichtengrenzen.
+Die früher in den Notizen beschriebene 35-Byte-Erweiterung mit Session-Token, App-Kennung und CRC ist in den vorhandenen PCAPs und im generischen APK-Builder nicht enthalten. Auch ein Session-Token in einem 46-Byte-`USBS`-Trailer ist damit nicht bestätigt. Der Client sendet jetzt den belegten 31-Byte-CBW und liest ein 13-Byte-Antwortsuffix; TCP bleibt dennoch ein Bytestrom ohne Anwendungsnachrichtengrenzen.
 
 ### 2. Kanalliste über TCP statt `0xF9/0x0A`
 
@@ -153,12 +148,12 @@ Ein ausgewerteter XML-Datensatz umfasst 440 Kanäle (303 TV, 137 Radio, 439 `fta
 
 ### 3. `0xF9/0x0A` ist keine bestätigte Kanalliste
 
-`0xF9/0x0A` taucht in mehreren Aufzeichnungen wiederholt auf. Im älteren Mitschnitt vom 11. Oktober gibt es 198 passende UDP-Antworten; der vorhandene Legacy-Parser decodiert daraus **keine** bestätigten Senderdatensätze, und die untersuchten Daten enthalten überwiegend Nullbytes. In den Mitschnitten vom 12. Oktober wird `0xF9/0x0A` ebenfalls vielfach gesendet, während die Kanalliste separat über TCP übertragen wird.
+`0xF9/0x0A` taucht in mehreren Aufzeichnungen auf. Die statische APK-Analyse ordnet den Befehl dem Speedtest zu: `getSpeedTestMbps()` sendet den Request mit `data_len=48.128`, verwendet die Antworten nur für eine Durchsatzberechnung und erwartet 48.130 Datenbytes plus 13 Abschlussbytes. Das erklärt die am 13. Oktober gemeldeten 48.143 Byte, nicht aber die abweichenden 32.740-Byte-Antworten im PCAP vom 11. Oktober. In den Mitschnitten vom 12. Oktober wird die Kanalliste separat über TCP übertragen.
 
 Daher gilt:
 
-- Der frühere Ansatz „`0xF9/0x0A` = Senderdatenbank“ ist für den OR S2D nicht belegt.
-- Zweck und Nutzdatenformat von `0xF9/0x0A` bleiben offen.
+- Der frühere Ansatz „`0xF9/0x0A` = Senderdatenbank“ ist für den OR S2D nicht belegt; im APK ist es ein Speedtest.
+- Die Füllbytes der 48.143-Byte-Antwort und die abweichenden 32.740-Byte-Antworten sind ohne Rohdaten nicht vollständig erklärt.
 - `fetch_service_db()` in `src/wisi_client.py` ist beim OR S2D ausdrücklich ein veralteter Kompatibilitätspfad und liefert keine Senderliste.
 
 ### 4. Streamablauf und MPEG-TS
@@ -196,7 +191,7 @@ In den neueren Mitschnitten treten außerdem `0xFA/0x00`, `0xFA/0x07` und `0xFA/
 | TCP `8802` | `0xF8/0x07` | Stream-Freigabe | Im Stream-Mitschnitt beobachtet |
 | UDP `8800` | `0xF9/0x02` | Stream-Initialisierung | Im Mitschnitt beobachtet |
 | UDP `8800` | `0xF9/0x01` | MPEG-TS-Block per Pull anfordern | Im Stream-Mitschnitt beobachtet |
-| UDP `8800` | `0xF9/0x0A` | Zweck offen; keine bestätigte Senderliste | Wiederholt beobachtet, Semantik ungeklärt |
+| UDP `8800` | `0xF9/0x0A` | Speedtest-Request im APK-SDK; keine bestätigte Senderliste | Builder und Durchsatzrechnung im APK; Antworten variieren zwischen den PCAPs |
 | APIX | `0xFA/0x00`, `0x07`, `0x08` | Geräte-/Netzwerkinformationen laut Analyse | Befehle beobachtet; Details siehe Forschungsnotiz |
 
 ## Projektstruktur
@@ -209,7 +204,7 @@ In den neueren Mitschnitten treten außerdem `0xFA/0x00`, `0xFA/0x07` und `0xFA/
 ├── pyproject.toml                         # Paket-/CLI-Konfiguration
 ├── src/
 │   ├── wisi.py                            # Gemeinsames CLI-Überskript
-│   ├── wisi_client.py                     # Aktueller OR-S2D-Client, 66-B-Builder und Streamlogik
+│   ├── wisi_client.py                     # OR-S2D-Client, 31-B-Builder und Streamlogik
 │   ├── wisi_channels.py                   # Kanalliste ausgeben
 │   ├── wisi_common.py                     # Gemeinsamer Einstieg zum Laden von Sendern
 │   ├── wisi_epg.py                        # EPG-Export; derzeit nicht end-to-end verifiziert
@@ -232,7 +227,7 @@ In den neueren Mitschnitten treten außerdem `0xFA/0x00`, `0xFA/0x07` und `0xFA/
 │   ├── wisi_dongle_v1.py                  # Früherer Client
 │   └── wisi_dongle_simple.py              # Minimaler Proof of Concept
 ├── tests/
-│   └── test_wisi_tools.py                 # Tests; aktuell teilweise veraltet
+│   └── test_wisi_tools.py                 # CLI-, PCAP- und Framingtests
 ├── PCAPdroid_12_Okt._16_16_04.pcap        # Mitschnitt: Kanallisten-/App-Ablauf
 └── PCAPdroid_12_Okt._16_28_17.pcap        # Mitschnitt: Tune und Stream
 ```
@@ -241,17 +236,17 @@ In den neueren Mitschnitten treten außerdem `0xFA/0x00`, `0xFA/0x07` und `0xFA/
 
 ## Offene Punkte & bekannte Einschränkungen
 
-1. **Session-Token-Framing prüfen.** `src/wisi_client.py` liest in `_send_recv()` Nutzdaten zusammen mit dem konfigurierten USBS-Trailer. `connect()` und weitere Aufrufstellen versuchen danach teilweise erneut, einen Trailer zu lesen. Da der erste Lesevorgang den Trailer bereits konsumieren kann, kann der zusätzliche Leseversuch blockieren oder den TCP-Bytestrom aus dem Takt bringen. Die Session-Token-Extraktion ist damit in der aktuellen Implementierung nicht zuverlässig belegt. Vor dem Bewerten von Auth-Problemen zuerst TCP-Framing, Trailer-Verantwortlichkeit und Token-Offset konsistent korrigieren.
+1. **Session-Token/Auth-Framing anderer Firmwarepfade verifizieren.** Für die untersuchte APK/PCAP-Variante ist kein Tokenfeld im 31-Byte-Request belegt; der Client sendet dafür Null als internen Platzhalter. Das schließt abweichende Firmwarepfade nicht aus.
 2. **EPG-CLI vervollständigen.** `connect()` gibt in `wisi_client.py` ein Tupel `(socket, session_token)` zurück; `src/wisi_epg.py` behandelt das Ergebnis aktuell an einer Stelle wie einen einzelnen Socket. Der `--epg`-Ablauf ist deshalb nicht als funktionierend dokumentiert.
 3. **TCP-Nachrichten robust lesen.** TCP kann Nutzdaten und Trailer auf beliebige Segmentgrenzen verteilen. Antwortlängen, Trailer und Timeouts müssen explizit und konsistent behandelt werden.
 4. **Live-Kanalliste und Stream wiederholen.** Die PCAPs belegen den App-Ablauf. Sie belegen nicht, dass jeder aktuelle Clientpfad, Token-Wert und PAT-Index ohne weitere Korrekturen live funktioniert.
-5. **`0xF9/0x0A`-Semantik und `0xF6/0x22` klären.** Der Vergleich der gespeicherten PCAPs ist in [research/pcap_analysis.md](research/pcap_analysis.md) dokumentiert. Für die abweichenden 48.143 Byte fehlt weiterhin der Rohblob; `0xF6/0x22` bleibt ebenfalls offen.
+5. **`0xF9/0x0A`-PCAP-Abweichung und `0xF6/0x22` prüfen.** Das APK belegt `0xF9/0x0A` als Speedtest; die 48.143 Byte sind damit erklärt. Die abweichenden 32.740-Byte-Antworten und die Notwendigkeit von `0xF6/0x22` bleiben offen.
 6. **Discovery verifizieren.** Die `0xFA`-APIX-Befehle und der experimentelle TV2S-JSON-UDP-Broadcast sind bislang nicht als derselbe Mechanismus belegt.
 7. **Pay-TV/CA nicht implementiert.** `prog_idx`-Werte mit `0x48`-Präfix werden in den Notizen verschlüsselten Kanälen zugeordnet. Die freie Senderliste und der freie MPEG-TS-Stream sind von einer autorisierten Entschlüsselung getrennt; CA-/Pay-TV-Funktionalität ist nicht Teil dieses Clients.
 
 ## Forschungsnotizen und Quellenreihenfolge
 
-Die Forschungsdateien sind in [research/README.md](research/README.md) zusammengefasst und nach Beleglage eingeordnet. Protokollhypothesen, insbesondere zu Authentifizierung, CRC, Scan-Opcodes und `0xF9/0x0A`, gelten nicht als bestätigt, solange kein reproduzierbarer Mitschnitt oder unabhängiger Test sie stützt.
+Die Forschungsdateien sind in [research/README.md](research/README.md) zusammengefasst und nach Beleglage eingeordnet. Protokollhypothesen, insbesondere zu Authentifizierung, CRC, Scan-Opcodes und variantenabhängigem Framing, gelten nicht als bestätigt, solange kein reproduzierbarer Mitschnitt oder unabhängiger Test sie stützt.
 
 Gerätemodell und Firmware-Update-Hinweise:
 

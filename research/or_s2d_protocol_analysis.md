@@ -12,9 +12,9 @@ Der tatsächlich vorhandene Dongle ist ein **WISI OR S2D** (auch „TiViCon OR S
 
 ---
 
-## 1. USBC-Paketformat: 66 Byte statt 31 Byte
+## 1. Frühere Hypothese: USBC mit 66 Byte (nicht bestätigt)
 
-Alle USBC-Befehle des OR S2D haben **66 Byte** (TCP und UDP):
+Die ältere Auswertung nahm an, dass OR-S2D-USBC-Befehle generell **66 Byte** lang sind. Die erneute Prüfung der enthaltenen PCAPs zeigt für erkannte APIX-Requests 31-Byte-USBC-Payloads; das generische APK-SDK baut ebenfalls 31 Byte. Die folgende Erweiterungsbelegung ist daher nicht als bestätigter Standard zu lesen:
 
 ```
 [00:04]  USBC           – Signatur (4 B)
@@ -35,14 +35,13 @@ Alle USBC-Befehle des OR S2D haben **66 Byte** (TCP und UDP):
 ──── Auth-Extension: 35 Byte ───────────────────────────────────────────────────
 ```
 
-**Wichtig:** Der ältere O2D-Code sendete nur 31-Byte-Pakete. Der OR S2D akzeptiert diese  
-für den Basis-Handshake (0x16/0x17), ignoriert aber Auth-lose Requests bei manchen Befehlen.
+Die beigelegten Mitschnitte zeigen keine 35-Byte-Auth-Erweiterung. Dass einzelne andere Firmware- oder Transportpfade sie verwenden oder benötigen könnten, ist mit diesen Artefakten nicht belegt.
 
 ---
 
-## 2. USBS-Antwortformat: 46 Byte Trailer (statt 13 Byte beim O2D)
+## 2. Frühere Hypothese: USBS-Trailer mit 46 Byte (nicht bestätigt)
 
-Jede Antwort des OR S2D endet mit einem **46-Byte-USBS-Trailer**, der die Auth-Extension zurückspiegelt:
+Die ältere Analyse nahm einen **46-Byte-USBS-Trailer** an, der die Auth-Erweiterung zurückspiegele. In den untersuchten PCAPs enden erkannte Antworten dagegen mit 13 Byte `USBS`; der generische APK-SDK-Transport verwendet ebenfalls einen 13-Byte-Abschluss. Der folgende 46-Byte-Aufbau ist nicht durch die enthaltenen Artefakte bestätigt:
 
 ```
 [0:4]    USBS           – Signatur
@@ -60,15 +59,9 @@ Jede Antwort des OR S2D endet mit einem **46-Byte-USBS-Trailer**, der die Auth-E
 
 ---
 
-## 3. Session-Token
+## 3. Session-Token: in aktuellen Artefakten nicht bestätigt
 
-Der 2-Byte Session-Token (z. B. `0x2794` in den PCAP-Traces) wird vom Dongle vergeben.  
-Er steht in der ersten 0x16-Antwort im USBS-Trailer bei **Byte [21:23]** (= Trailer-Offset, nicht absolut).
-
-Derselbe Token wird in **jedem** nachfolgenden Befehl (TCP und UDP) im Auth-Feld [41:43] mitgeschickt  
-und in jeder Antwort zurückgespiegelt.
-
-**Praxis:** Den Token aus dem ersten vollständigen USBS-Trailer extrahieren, danach für alle Befehle nutzen.
+Die frühere Zuordnung eines 2-Byte-Tokens auf Offset `[21:23]` hängt von der unbestätigten 46-Byte-Trailerhypothese ab. Die beobachteten 13-Byte-`USBS`-Suffixe enthalten dieses Feld nicht; der generische APK-Builder serialisiert ebenfalls keinen Token. Für die hier belegte 31/13-Byte-Variante deshalb keinen Token-Offset voraussetzen.
 
 ---
 
@@ -113,18 +106,18 @@ XML-Gesamtgröße: **61.348 Byte** (0xEFA4).
 
 ---
 
-## 5. 0xF9/0x0A: Wird beim OR S2D ANDERS verwendet
+## 5. `0xF9/0x0A`: Speedtest statt bestätigter Senderliste
 
-Beim O2D lieferte `0xF9/0x0A` die Kanalliste als Binär-Blob via UDP.  
-Beim OR S2D sendet der Client ebenfalls `0xF9/0x0A` (200×), aber:
+Die statische Analyse der hochgeladenen TV2Smart-XAPK zeigt einen konkreten Einsatz von `0xF9/0x0A` in `getSpeedTestMbps()`:
 
-- Das Request-Format ist **66 Byte** (mit Auth-Extension und `TV2Smart`-String)
-- Die Antwort kommt als **USBS-Ack** (46 B) zurück, kein Kanal-Blob
-- Wozu diese 200 Requests dienen, ist noch **unklar** (evtl. EPG-Polling oder Keepalive)
-- Die Kanalliste wird **nicht** dadurch übertragen → unser alter Parser produziert zu Recht 0 Einträge
+- Der APK-Builder erzeugt einen **31-Byte-USBC-Request** mit `data_len=48.128`, Prefix `0xF9` und Opcode `0x0A`.
+- Der Speedtest fordert 48.130 Datenbytes an, zählt erfolgreiche Antworten und berechnet den Durchsatz mit 48.128 Byte pro Antwort.
+- Der Netzwerkempfänger liest bei dieser Antwortlänge 13 weitere Abschlussbytes. `48.130 + 13 = 48.143`, exakt die am 13. Oktober protokollierte Gesamtlänge.
+- Damit ist die 48.143-Byte-Antwort sehr wahrscheinlich ein Speedtest-Block und keine Senderdatenbank. Der APK-Code prüft oder dekodiert die Daten nicht als Senderliste.
 
-**Konsequenz:** `fetch_service_db()` via `0xF9/0x0A` ist beim OR S2D obsolet.  
-Die Kanalliste muss via `0xF6/0x20` + `0xF6/0x21` (TCP) geholt werden.
+Der Rohblob vom 13. Oktober liegt weiterhin nicht vor; Füllbytes und Abschluss wurden daher nicht bytegenau kontrolliert. Die älteren PCAP-Antworten mit 32.740 Byte sind eine andere beobachtete Größe und bleiben davon getrennt. Die PCAPs vom 12. Oktober zeigen außerdem kurze 13-Byte-`USBS`-Antworten.
+
+**Konsequenz:** `fetch_service_db()` via `0xF9/0x0A` ist für den OR-S2D-Kanallistenpfad ungeeignet. Die Kanalliste wird im PCAP über TCP `0xF6/0x20` + `0xF6/0x21` als XML übertragen.
 
 ---
 
@@ -140,14 +133,13 @@ Der OR S2D hat einen separaten Discovery-Mechanismus mit Prefix **0xFA**:
 
 Beispiel `0xFA/0x07`-Antwort: `fa 07 01 4f 52 20 53 32 44 ...` → `"OR S2D"` ab Byte 3.
 
-Diese Befehle sind für den normalen Stream-Betrieb nicht nötig, aber nützlich zur  
-Geräte-Identifikation und zur Session-Token-Initialisierung.
+Diese Befehle sind für den normalen Stream-Betrieb nicht nötig, aber nützlich zur Geräte-Identifikation. Eine Session-Token-Initialisierung über `0xFA/0x00` ist mit den aktuell geprüften APK-/PCAP-Artefakten nicht bestätigt.
 
 ---
 
 ## 7. Tune-Ablauf (bestätigt)
 
-Der Tune-Ablauf ist beim OR S2D identisch zum O2D, nur mit 66-Byte-Paketen:
+Der folgende Tune-Ablauf ist im OR-S2D-PCAP beobachtet. Die dort erkannten `USBC`-Requests sind 31 Byte; eine pauschale 66-Byte-Erweiterung ist nicht belegt:
 
 ```
 1. 0xF6/0x03  – Kanal vorbereiten (prog_idx)
@@ -181,12 +173,12 @@ Unverändert gegenüber O2D:
 
 | Priorität | Thema                                             | Hinweis |
 |-----------|---------------------------------------------------|---------|
-| 🔴 1      | Session-Token: genaue Position im USBS-Trailer    | Aus PCAP bei Byte [21:23] des Trailers, aber per Offset im TCP-Stream unterschiedlich – robuste Extraktion nötig |
+| 🔴 1      | Session-Token/Auth-Feld anderer Varianten         | Für die 31-Byte-Requests und 13-Byte-Suffixe in APK/PCAP nicht belegt; abweichende Firmwarepfade offen |
 | 🔴 2      | CRC-Algorithmus                                   | Unbekannt; Dongle prüft es scheinbar nicht → Nullbytes senden |
-| 🟡 3      | `0xF9/0x0A` × 200: Zweck klären                  | Evtl. EPG-Poll oder Scan-Trigger; neues PCAP nach Sendersuchlauf nötig |
+| 🟡 3      | `0xF9/0x0A`-Antwortbytes vergleichen              | Speedtest-Rolle ist im APK-Code belegt; die abweichenden 32.740-Byte-PCAP-Antworten sind bytegenau noch nicht zugeordnet |
 | 🟡 4      | Kanalwechsel testen                               | `0xF6/0x01` mit anderem PAT-Index; braucht laufenden Stream |
 | 🟡 5      | `0xF6/0x22` Abschluss nach ch_List               | Ob nötig oder optional, ist unklar |
-| 🟢 6      | `0xFA/0x00` für Session-Token nutzen             | Robustere Alternative zur Extraktion aus USBS-Trailer |
+| 🟢 6      | `0xFA/0x00`-Antwortstruktur weiter verifizieren  | Geräteinfo beobachtet; Session-Token-Bedeutung nicht bestätigt |
 | 🟢 7      | Pay-TV / verschlüsselte Kanäle                    | `prog_idx` mit `0x48`-Prefix = encrypted; CA-Handling fehlt |
 
 ---
@@ -195,9 +187,9 @@ Unverändert gegenüber O2D:
 
 | Merkmal                  | O2D / Tivizen       | OR S2D                          |
 |--------------------------|---------------------|----------------------------------|
-| USBC-Paketgröße          | 31 Byte             | 66 Byte (+ Auth-Extension)       |
-| USBS-Trailer             | 13 Byte             | 46 Byte                          |
-| Auth-Token               | keiner              | 2-Byte Session-Token + TV2Smart  |
+| USBC-Paketgröße          | 31 Byte             | 31 Byte in APK/PCAP; 66 Byte nicht bestätigt |
+| USBS-Trailer             | 13 Byte             | 13 Byte in den untersuchten PCAPs |
+| Auth-Token               | keiner              | Für die untersuchte 31/13-Byte-Variante nicht belegt |
 | Kanalliste               | UDP 0xF9/0x0A Binär | TCP 0xF6/0x20+0x21 XML           |
 | EPG                      | TCP 0x30/0x31       | vermutlich gleich (nicht getestet)|
 | Discovery-Prefix         | nicht vorhanden     | 0xFA                             |
