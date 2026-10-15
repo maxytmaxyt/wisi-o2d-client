@@ -197,6 +197,10 @@ def _cmd_chlist_data(size: int, st: bytes = b"\x00\x00") -> bytes:
     """0xF6/0x21 – <ch_List> XML-Daten abrufen."""
     return _build_usbc(size, 0x80, 0xF6, 0x21, session_token=st)
 
+def _cmd_chlist_ack(size: int, st: bytes = b"\x00\x00") -> bytes:
+    """0xF6/0x22 – Empfang der ch_List quittieren (gleiche data_len wie 0x21)."""
+    return _build_usbc(size, 0x80, 0xF6, 0x22, session_token=st)
+
 def _cmd_prepare(prog_idx: int, st: bytes = b"\x00\x00") -> bytes:
     return _build_usbc(
         4, 0x80, 0xF6, 0x03,
@@ -383,13 +387,24 @@ def fetch_channel_list(
     with lock:
         r = _send_recv(sock, _cmd_chlist_size(session_token), 8, "0xF6/0x20 ch_List_Size")
 
-    if len(r) < 4:
+    if len(r) < 6:
         log.warning("0xF6/0x20: Antwort zu kurz (%dB)", len(r))
         return []
 
-    xml_size = struct.unpack(">I", r[0:4])[0]
+    # Die 8-Byte-Antwort hat das Format:
+    #   [0:2]  Opcode-Echo  (f6 20)
+    #   [2:6]  XML-Größe als BE uint32
+    #   [6:8]  Padding
+    xml_size = struct.unpack(">I", r[2:6])[0]
     if xml_size == 0:
         log.warning("0xF6/0x20: Kanalliste leer (Größe=0)")
+        return []
+    if xml_size > 10 * 1024 * 1024:
+        log.error(
+            "0xF6/0x20: XML-Größe %d Byte unrealistisch groß – "
+            "falsches Antwort-Offset? raw=%s",
+            xml_size, r[:8].hex(),
+        )
         return []
 
     log.info("ch_List XML-Größe: %d Byte", xml_size)
@@ -402,6 +417,10 @@ def fetch_channel_list(
     xml_bytes = xml_raw[:xml_size]
     log.debug("ch_List empfangen: %dB", len(xml_bytes))
 
+    if len(xml_bytes) == 0:
+        log.warning("ch_List: keine Daten empfangen (0 Byte)")
+        return []
+
     # XML-Grenzen ermitteln
     start = xml_bytes.find(b"<ch_List>")
     end = xml_bytes.rfind(b"</ch_List>")
@@ -413,6 +432,14 @@ def fetch_channel_list(
         channels = parse_chlist_xml(xml_bytes[start : end + len(b"</ch_List>")])
 
     log.info("ch_List geparst: %d Kanäle", len(channels))
+
+    # Schritt 3: 0xF6/0x22 – Empfang quittieren (optional laut Spec, aber Dongle trennt sonst)
+    try:
+        with lock:
+            _send_recv(sock, _cmd_chlist_ack(xml_size, session_token), 8, "0xF6/0x22 ch_List_Ack")
+    except Exception as e:
+        log.debug("0xF6/0x22 Ack fehlgeschlagen (ignoriert): %s", e)
+
     return channels
 
 
