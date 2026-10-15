@@ -90,8 +90,8 @@ python src/wisi.py --ip 192.168.178.32 --stream --pat-idx 4 --output - | vlc -
 ### PCAP untersuchen
 
 ```bash
-python src/wisi.py --pcap "PCAPdroid_12_Okt._16_16_04.pcap"
-python src/wisi.py --pcap "PCAPdroid_12_Okt._16_28_17.pcap"
+python src/wisi.py --pcap "research/PCAPdroid_12_Okt._16_16_04.pcap"
+python src/wisi.py --pcap "research/PCAPdroid_12_Okt._16_28_17.pcap"
 ```
 
 Eine ältere `0xF9/0x0A`-Antwort kann für die Untersuchung unverändert extrahiert werden:
@@ -211,7 +211,7 @@ In den neueren Mitschnitten treten außerdem `0xFA/0x00`, `0xFA/0x07` und `0xFA/
 │   ├── wisi_discovery.py                  # Experimenteller TV2S-JSON-UDP-Broadcast
 │   ├── wisi_pcap.py                       # PCAP-/APIX-Auswertung, Legacy-Service-DB-Export
 │   ├── wisi_probe.py                      # Einzelnen Opcode testen
-│   ├── wisi_menu.py                       # Älterer/Legacy-Menüeinstieg
+│   ├── wisi_menu.py                       # Legacy-Einstieg (veraltet, nicht verwenden)
 │   └── protocol.py                        # Älterer 31-B-APIX-Helper; nicht mit OR-S2D-Builder verwechseln
 ├── research/
 │   ├── README.md                         # Zusammenfassung und Einordnung der Forschung
@@ -228,8 +228,11 @@ In den neueren Mitschnitten treten außerdem `0xFA/0x00`, `0xFA/0x07` und `0xFA/
 │   └── wisi_dongle_simple.py              # Minimaler Proof of Concept
 ├── tests/
 │   └── test_wisi_tools.py                 # CLI-, PCAP- und Framingtests
-├── PCAPdroid_12_Okt._16_16_04.pcap        # Mitschnitt: Kanallisten-/App-Ablauf
-└── PCAPdroid_12_Okt._16_28_17.pcap        # Mitschnitt: Tune und Stream
+│   ├── PCAPdroid_12_Okt._16_16_04.pcap    # Mitschnitt: Kanallisten-/App-Ablauf
+│   ├── PCAPdroid_12_Okt._16_28_17.pcap   # Mitschnitt: Tune und Stream
+│   └── TV2Smart_3.M20260803.0-...xapk    # APK-Archiv für Reverse Engineering
+├── .gitignore
+└── pyproject.toml
 ```
 
 `__pycache__/`, `.venv/` und `.git/` sind lokale Laufzeit-/Entwicklungsverzeichnisse und gehören nicht zur fachlichen Projektstruktur. PCAPs können private Netzwerkdaten enthalten; vor Veröffentlichung prüfen und gegebenenfalls aus dem Repository entfernen.
