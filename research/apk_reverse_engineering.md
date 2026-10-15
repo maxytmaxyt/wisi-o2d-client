@@ -47,6 +47,73 @@ Das erklärt die am 13. Oktober gemeldete Länge und das `f9 0a`-Präfix sehr gu
 
 Das DEX enthält außerdem `SecureNativeModule` mit JNI-Methoden für Authentifizierungs-/DH-/SAC-Nachrichten und die ARM64-Datei `libsecure_module.so`. Das belegt, dass die App CI+-artige Sicherheitsfunktionen mitbringt. Es beweist weder, dass diese Funktionen beim WISI OR S2D verwendet werden, noch einen bestimmten APIX-Shared-Secret- oder Challenge-Response-Algorithmus. Die früher notierte Formel `MD5(Challenge || SharedSecret || Timestamp)` ist durch diese APK-Analyse nicht bestätigt.
 
+## Native-Library-Analyse (15. Oktober 2026)
+
+Die ARM64-Bibliotheken aus `config.arm64_v8a.apk` wurden mit `strings` und `nm` statisch ausgelesen. Die Analyse wurde ohne Laufzeitumgebung durchgeführt und belegt keine Ausführung auf echtem Gerät.
+
+### Übersicht der Native-Libs
+
+| Datei | Größe | Funktion |
+|---|---|---|
+| `libsecure_module.so` | 229 KB | CI+-artige Content-Control-Auth (SAC/CC-Protokoll, DH-Key-Exchange) |
+| `libpimbridge.so` | 5,4 KB | JNI-Wrapper für PIM-Entschlüsselung (ruft `libpimdec.so` auf) |
+| `libpimdec.so` | 68 KB | Eigentlicher PIM-Decoder (proprietäre CA-Entschlüsselung, Key-Table aus `libpimbridge.so`) |
+| `librtmp-jni.so` | 90 KB | RTMP-Streaming (für externe Streams, nicht OR S2D APIX) |
+| `libvlc.so` / `libvlcjni.so` | 44 MB / 94 KB | VLC-Player-Core; `libvlc.so` enthält MD5-Implementierung für interne Zwecke |
+
+### Hardcodierter String in `libsecure_module.so`
+
+In der `.rodata`-Sektion von `libsecure_module.so` wurde ein Base64-kodierter String gefunden, der direkt über dem `CCMSG_CreateAuthReqNoncePacket`-Symbol steht:
+
+```
+THVrZVJhbkRvbHBoQ0krMQ==  →  dekodiert: LukeRanDolphCI+1
+```
+
+**Kontext im Binary:**
+```
+CCMSG_CreateAuthReqNoncePacket    ← Symbol (Nonce-Paket-Builder)
+Chunk- %s
+AUTH_SEND_NONCE
+THVrZVJhbkRvbHBoQ0krMQ==         ← Base64-String im .rodata
+%02X
+nonce
+```
+
+Der String liegt im Nur-Lese-Datensegment, nicht auf dem Stack oder in einer Funktion. Er wird wahrscheinlich als statisches Argument an `CNKEY_Init()` oder `SECTK_Initialise()` übergeben, die beide am Anfang der Init-Kette stehen.
+
+**Weitere relevante Symbole in derselben Lib:**
+- `CNKEY_Init`, `CNKEY_GetHostKey`, `CNKEY_CalculateRootKey` – Key-Derivation-Chain
+- `SECTK_GenerateDhKeys`, `SECTK_CalculateDhShared`, `SECTK_CheckDhPublicKey` – Diffie-Hellman-Schlüsselaustausch
+- `SECTK_Sha256`, `CE_Sha256`, `CE_Sha1` – Hashfunktionen (kein MD5 in dieser Lib)
+- `SECTK_AesEncrypt`, `SECTK_AesCbcEncrypt` – AES-Verschlüsselung des SAC-Kanals
+- Chunk-Keys: `dh_g`, `dh_p`, `dh_q` – DH-Parameter (in `.rodata`, Werte binär kodiert)
+- Debugpfad: `/home/paul/ANDROID/Android-Studio-Projects/CreTV/tivicon-dvb-sdk-internal-network-eventbus/...` – bestätigt CreNova als Hersteller
+
+### Einordnung: Wofür wird das gebraucht?
+
+Das CI+-artige SAC/CC-Protokoll in `libsecure_module.so` ist für **Pay-TV / Conditional Access** zuständig, nicht für normales FTA-Streaming. Die Package-Struktur bestätigt das eindeutig:
+
+- `com.crenova.tv.dongle.dvb.sdk.cas.*` – CAS = **Conditional Access System**
+- `com.crenova.tv.dongle.dvb.sdk.security.*` – Sicherheits-Layer für CA
+- `SecureNativeModule` mit `msgCreateAuthReqNoncePacket`, `msgCreateCCSACKeyingReqPacket` etc. – SAC = Secure Authenticated Channel (CI+-Protokoll)
+
+**Für FTA-Streaming (Schritt 1–3 im normalen Ablauf) wird `libsecure_module.so` nicht benötigt.**
+
+`LukeRanDolphCI+1` ist wahrscheinlich ein **Root-Key oder Seed** für die CNKEY-Derivation-Chain, die ausschließlich im CA-Pfad (Pay-TV) aktiv wird. Die bisherigen PCAPs zeigen keine CC/SAC-Handshake-Pakete im normalen Stream-Betrieb – was zu FTA-Kanälen passt.
+
+### Was `libpimbridge.so` / `libpimdec.so` macht
+
+PIM (Programme Integration Module) ist ein separater proprietärer CA-Pfad über Multicast-UDP. `PimCarouselClient` empfängt Kanal-Metadaten per Multicast (`chanmap`/`echan` als JSON), öffnet UDP-Streams und ruft `pim_decode()` mit den TS-Paketen auf. Das ist **unabhängig vom APIX/USBC-Protokoll** und nicht Teil des OR S2D Streaming-Pfads.
+
+### Fazit für den Client
+
+| Frage | Antwort |
+|---|---|
+| Braucht normales FTA-Streaming die CC/SAC-Auth? | **Nein.** Kein SAC-Handshake in FTA-PCAPs sichtbar. |
+| Was ist `LukeRanDolphCI+1`? | Root-Key/Seed für CI+-artige Pay-TV-Authentifizierung (CNKEY-Chain). |
+| Braucht man `libsecure_module.so` für den Python-Client? | Nur wenn verschlüsselte Kanäle (`0x48xxxxxx`-prog_idx) geöffnet werden sollen. |
+| War die Formel `MD5(Challenge || SharedSecret || Timestamp)` korrekt? | **Nicht bestätigt.** `libsecure_module.so` verwendet SHA-256 und AES, kein MD5 im CC-Pfad. |
+
 ## Korrigierte Aussagen und verbleibende Grenzen
 
 | Frühere Aussage | Ergebnis aus dem hochgeladenen Artefakt |

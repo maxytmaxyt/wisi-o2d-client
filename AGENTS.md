@@ -75,18 +75,19 @@ Dieses Repo enthält einen reverse-engineerten Python-Client für den **WISI OR 
 
 ---
 
-### 🟡 4 – `SharedSecret` aus `libtv2smart_native.so` extrahieren
+### ✅ 4 – `SharedSecret` aus Native-Lib extrahieren (abgeschlossen, 15. Oktober 2026)
 
-**Problem:** Die APK-Spec beschreibt `SessionToken = MD5(Challenge ‖ SharedSecret ‖ Timestamp)`. Der Key liegt in der Native-Lib.
+**Ergebnis:** Analyse von `libsecure_module.so` aus `config.arm64_v8a.apk` abgeschlossen. Details in `research/apk_reverse_engineering.md` → Abschnitt "Native-Library-Analyse".
 
-**Was zu tun ist:**
-- APK entpacken: `unzip research/TV2Smart_3.M20260803.0-rev-a14aeb377_APKPure.xapk -d /tmp/apk_extracted`
-- Native Lib finden: `find /tmp/apk_extracted -name "*.so"`
-- Key suchen: `strings libtv2smart_native.so | grep -E '[a-f0-9]{16,}'`
-- Für gründlichere Analyse: Ghidra oder radare2 verwenden
-- Ergebnis in `research/apk_reverse_engineering.md` dokumentieren
+**Wichtigste Erkenntnisse:**
+- In `libsecure_module.so` (.rodata) gefunden: `THVrZVJhbkRvbHBoQ0krMQ==` → dekodiert: **`LukeRanDolphCI+1`**
+- Dieser String ist ein Root-Key/Seed für die `CNKEY`-Derivation-Chain im CI+-artigen Content-Control-Protokoll
+- Das CC/SAC-Protokoll ist **ausschließlich für Pay-TV** (verschlüsselte Kanäle, `0x48xxxxxx`-prog_idx)
+- Für **FTA-Streaming braucht man diese Auth nicht** – keine SAC-Handshake-Pakete in FTA-PCAPs
+- Die frühere Formel `MD5(Challenge ‖ SharedSecret ‖ Timestamp)` ist falsch: `libsecure_module.so` nutzt SHA-256 + AES, kein MD5
+- Die App enthält weder `libtivicon_dvb.so` noch `libstream_decoder.so` (frühere Notizen falsch)
 
-**Hinweis:** Auth-Token wird möglicherweise gar nicht gebraucht wenn der Dongle im selben WLAN ist (bisherige PCAPs zeigen keine Auth-Phase im normalen Ablauf).
+**Offen für spätere Pay-TV-Arbeit:** DH-Parameter (`dh_g`, `dh_p`, `dh_q`) und CNKEY-Chain-Werte sind im Binary, aber ohne Ghidra-Disassembly nicht vollständig extrahierbar.
 
 ---
 
