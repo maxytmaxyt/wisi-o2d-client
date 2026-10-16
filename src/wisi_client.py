@@ -61,6 +61,11 @@ UDP_TS_SIZE      = 32712    # 174 × 188 Byte reiner MPEG-TS
 TS_PKT_SIZE      = 188
 TS_SYNC          = 0x47
 
+# Speedtest-Response: 48128 Nutzdaten + 77 Byte Overhead = 48205 Byte total.
+# Diese Pakete haben weder USBS- noch \xf9\x0a-Prefix und würden sonst
+# nur am fehlenden TS-Sync scheitern – explizit herausfiltern.
+SPEEDTEST_RESPONSE_SIZE = UDP_REQUEST_LEN + 77  # 48205
+
 CBW_LEN_FORMAT   = ">I"
 
 
@@ -328,7 +333,13 @@ def _keepalive_worker(
     lock: threading.Lock,
     stop: threading.Event,
     session_token: bytes = b"\x00\x00",
+    on_dead: Optional[threading.Event] = None,
 ) -> None:
+    """
+    Sendet periodisch 0x16-Pings.
+    `on_dead`: optionales Event das gesetzt wird wenn der Socket abbricht –
+    erlaubt dem Stream-Thread darauf zu reagieren (z. B. Re-Tune auf KA-Socket).
+    """
     cmd = _cmd_16(session_token)
     while not stop.wait(KEEPALIVE_INTVL):
         try:
@@ -336,7 +347,12 @@ def _keepalive_worker(
                 sock.sendall(cmd)
                 _recv_exactly(sock, 12 + USBS_LEN)
         except OSError as e:
-            log.debug("Keep-Alive Fehler: %s", e)
+            # Problem 1: Nach dem Tune schließt der Dongle die erste TCP-Verbindung
+            # (z. B. WinError 10053). Das ist erwartet – den Fehler nur als DEBUG
+            # loggen und den Stream-Thread via on_dead benachrichtigen.
+            log.debug("Keep-Alive Socket gestorben (erwartet nach Tune): %s", e)
+            if on_dead is not None:
+                on_dead.set()
             break
 
 
@@ -564,11 +580,16 @@ def stream(
     stop = threading.Event()
     dongle_ip = tcp_sock.getpeername()[0]
 
+    # Problem 1: tcp_sock stirbt nach dem Tune (WinError 10053) – erwartet.
+    # tcp_sock_dead signalisiert dem Stream-Thread wann das passiert,
+    # damit er Re-Tune auf stream_ka_sock anstoßen kann (Problem 3).
+    tcp_sock_dead = threading.Event()
+
     ka: Optional[threading.Thread] = None
     if not keepalive_active:
         ka = threading.Thread(
             target=_keepalive_worker,
-            args=(tcp_sock, lock, stop, session_token),
+            args=(tcp_sock, lock, stop, session_token, tcp_sock_dead),
             daemon=True,
         )
         ka.start()
@@ -576,7 +597,9 @@ def stream(
     stream_ka_stop: Optional[threading.Event] = None
     stream_ka: Optional[threading.Thread] = None
     stream_ka_sock = None
+    stream_ka_lock: Optional[threading.Lock] = None
 
+    # UDP-Socket VOR dem ersten TCP-Befehl binden (Problem 3: zu spätes Bind).
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
     udp.bind(("", 0))
@@ -599,23 +622,40 @@ def stream(
         with lock:
             _send_recv(tcp_sock, _cmd_stream_release(session_token), 0, "0xF8/0x07 release")
 
-        # Erster UDP-Block
+        # Erster UDP-Block (Pull #1, first=True → byte21=0x00)
         udp.sendto(_udp_request_block(first=True, st=session_token), (dongle_ip, UDP_PORT))
+        pull_count = 1
+        log.debug("0xF9/0x01 Pull #1 (first) gesendet")
 
         # Tune bestätigen (TCP)
         with lock:
             r = _send_recv(tcp_sock, _cmd_17_confirm(session_token), 4, "0x17 confirm")
         log.info("0x17 confirm: 0x%02X", r[2] if len(r) > 2 else 0xFF)
 
-        # Keep-Alive-Verbindung nach Tune
+        # Problem 3: Keep-Alive-Verbindung nach Tune aufbauen.
+        # Nach dem Tune schließt der Dongle tcp_sock (Problem 1). Die zweite
+        # Verbindung (stream_ka_sock) übernimmt das Keep-Alive UND re-tuned,
+        # damit der Dongle den Stream nicht nach Timeout abbricht.
         result = connect(dongle_ip)
         if result is None:
             raise ConnectionError("Keep-Alive-Verbindung nach Tune fehlgeschlagen.")
         stream_ka_sock, _ = result
+        stream_ka_lock = threading.Lock()
+
+        # Re-Tune + Stream-Freigabe auf der neuen Verbindung damit der Dongle
+        # stream_ka_sock als neuen Stream-Owner erkennt und weiter sendet.
+        try:
+            with stream_ka_lock:
+                _send_recv(stream_ka_sock, _cmd_tune(svc.pat_index, session_token), 2, "0x01 re-tune KA")
+                _send_recv(stream_ka_sock, _cmd_stream_release(session_token), 0, "0xF8/0x07 re-release KA")
+            log.info("Re-Tune + Stream-Freigabe auf KA-Socket erfolgreich.")
+        except OSError as e:
+            log.warning("Re-Tune auf KA-Socket fehlgeschlagen (weiter): %s", e)
+
         stream_ka_stop = threading.Event()
         stream_ka = threading.Thread(
             target=_keepalive_worker,
-            args=(stream_ka_sock, threading.Lock(), stream_ka_stop, session_token),
+            args=(stream_ka_sock, stream_ka_lock, stream_ka_stop, session_token),
             daemon=True,
         )
         stream_ka.start()
@@ -628,10 +668,14 @@ def stream(
         t_start = time.monotonic()
         block_num = 0
         ts_bytes = 0
-        pull_count = 1
-        next_pull = t_start + UDP_PULL_INTVL
+        # Problem 2: Request-Response-Pull statt blindem Timer.
+        # Ein Pull wird sofort nach einem empfangenen TS-Block gesendet.
+        # Der Timer greift nur als Fallback wenn keine Daten kommen.
+        pull_pending = True    # Pull #1 wurde schon gesendet – wir warten auf Antwort
+        next_pull_deadline = t_start + UDP_PULL_INTVL  # Timeout für ausstehenden Pull
         last_packet_at = t_start
         next_timeout_warning = t_start + 5.0
+        speedtest_count = 0
 
         try:
             while not stop.is_set():
@@ -639,13 +683,17 @@ def stream(
                 if duration_s > 0 and now - t_start >= duration_s:
                     log.info("Dauer %.0f s erreicht.", duration_s)
                     break
-                if now >= next_pull:
+
+                # Pull-Fallback: Wenn seit UDP_PULL_INTVL keine Antwort kam, nochmal fragen.
+                # Kein Burst: nur senden wenn kein Pull gerade aussteht ODER der Timer abgelaufen ist.
+                if not pull_pending or now >= next_pull_deadline:
                     udp.sendto(
                         _udp_request_block(first=False, st=session_token),
                         (dongle_ip, UDP_PORT),
                     )
                     pull_count += 1
-                    next_pull = now + UDP_PULL_INTVL
+                    pull_pending = True
+                    next_pull_deadline = now + UDP_PULL_INTVL
                     log.debug("0xF9/0x01 Pull #%d gesendet", pull_count)
 
                 try:
@@ -657,7 +705,24 @@ def stream(
                         next_timeout_warning = now + 5.0
                     continue
 
+                # Problem 2: Explizites Herausfiltern von Speedtest-Responses (48205 Byte)
+                # und bekannten Non-TS-Präfixen. Diese Pakete haben weder USBS- noch
+                # \xf9\x0a-Prefix, scheitern aber am TS-Sync – früh ausfiltern spart Arbeit.
                 if data[:4] == b"USBS" or data[:2] == b"\xf9\x0a":
+                    continue
+                if len(data) == SPEEDTEST_RESPONSE_SIZE:
+                    speedtest_count += 1
+                    if speedtest_count == 1:
+                        log.warning(
+                            "Speedtest-Response (%dB) vom Dongle empfangen – "
+                            "zu viele Pulls oder falscher Modus. "
+                            "Weitere Speedtest-Blöcke werden still verworfen.",
+                            len(data),
+                        )
+                    else:
+                        log.debug("Speedtest-Response #%d verworfen", speedtest_count)
+                    # Keinen sofortigen Re-Pull senden – Timer-Fallback reicht.
+                    pull_pending = False
                     continue
 
                 sync_offset = data.find(bytes([TS_SYNC]))
@@ -675,6 +740,7 @@ def stream(
                     log.debug(
                         "Kein MPEG-TS-Sync in UDP-Datagramm (%dB) – verworfen", len(data)
                     )
+                    pull_pending = False
                     continue
 
                 ts_data = data[sync_offset:]
@@ -688,11 +754,23 @@ def stream(
 
                 complete_len = len(ts_data) - len(ts_data) % TS_PKT_SIZE
                 if complete_len == 0:
+                    pull_pending = False
                     continue
                 out.write(ts_data[:complete_len])
                 out.flush()
                 block_num += 1
                 ts_bytes += complete_len
+
+                # Problem 2: Sofort nächsten Pull senden nach erfolgreichem TS-Block
+                # (Request-Response-Modell verhindert Pileup von Pulls).
+                udp.sendto(
+                    _udp_request_block(first=False, st=session_token),
+                    (dongle_ip, UDP_PORT),
+                )
+                pull_count += 1
+                pull_pending = True
+                next_pull_deadline = time.monotonic() + UDP_PULL_INTVL
+                log.debug("0xF9/0x01 Pull #%d (nach Block %d)", pull_count, block_num)
 
                 if block_num % 50 == 0:
                     elapsed = time.monotonic() - t_start
