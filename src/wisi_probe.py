@@ -6,31 +6,26 @@ import logging
 import sys
 from collections.abc import Sequence
 
-from wisi_client import (
-    DEFAULT_IP,
-    _build_usbc,
-    _send_recv,
-    connect,
-    disconnect,
-)
+import protocol
+from wisi_common import DEFAULT_IP
 
 
 def run(ip: str, opcode: int) -> int:
     if not 0x04 <= opcode <= 0x1F or opcode in (0x16, 0x17):
         raise ValueError("Probe erlaubt nur einzelne Opcodes 0x04-0x1F außer 0x16/0x17.")
-    sock = connect(ip)
+    sock = protocol.connect(ip)
     if sock is None:
         raise ConnectionError(f"Verbindung zu {ip}:8802 fehlgeschlagen.")
     try:
-        response = _send_recv(
+        response = protocol.send_recv(
             sock,
-            _build_usbc(4, 0x80, 0xF6, opcode),
+            protocol.cmd_probe(opcode),
             4,
             f"probe 0x{opcode:02X}",
         )
         print(f"Opcode 0x{opcode:02X}: {response.hex(' ') or '(keine Nutzdaten)'}")
     finally:
-        disconnect(sock)
+        protocol.disconnect(sock)
     return 0
 
 
