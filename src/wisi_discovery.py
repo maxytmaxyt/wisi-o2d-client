@@ -11,7 +11,7 @@ import time
 from collections.abc import Sequence
 
 from wisi_common import DEFAULT_IP
-from wisi_client import TCP_PORT
+from protocol import TCP_PORT
 
 MAGIC = 0x54563253
 VERSION = 0x0100
