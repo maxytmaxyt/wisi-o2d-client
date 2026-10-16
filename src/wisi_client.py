@@ -18,13 +18,17 @@ import logging
 import sys
 
 import protocol
-from channels import fetch_channel_list, channels_to_services
+from channels import fetch_channel_list, channels_to_services, fetch_service_db
 from menu import main_menu
-from models import FALLBACK_SERVICE, ServiceEntry
+from models import FALLBACK_SERVICE, ServiceEntry, Channel
 from stream import prepare_channel, stream
 
 # Re-Export für wisi.py (importiert DEFAULT_IP von hier)
 DEFAULT_IP = protocol.DEFAULT_IP
+
+# Private Aliase für Tests und Rückwärtskompatibilität
+_cmd_16 = protocol.cmd_16
+_send_recv = protocol.send_recv
 
 logging.basicConfig(
     level=logging.INFO,
