@@ -11,7 +11,7 @@ from models import ServiceEntry, FALLBACK_SERVICE
 
 DEFAULT_IP = protocol.DEFAULT_IP
 
-# Modul-Level-Aliase damit Tests sie patchen können
+# Modul-Level-Aliase damit Tests sie via patch.object ersetzen können
 connect    = protocol.connect
 disconnect = protocol.disconnect
 
@@ -20,9 +20,17 @@ def load_services(ip: str, timeout: float = 15.0) -> List[ServiceEntry]:
     """
     Verbindet mit dem Dongle, lädt Kanalliste via TCP 0xF6/0x20+0x21
     und gibt eine Liste von ServiceEntry zurück.
-    Wirft ConnectionError wenn kein Kanal gefunden wird.
+
+    connect() darf (sock, session_token) oder nur sock zurückgeben –
+    beide Varianten werden korrekt behandelt.
     """
-    sock = connect(ip)
+    result = connect(ip)
+    # Unterstütze beides: reines socket-Objekt und (sock, session_token)-Tupel
+    if isinstance(result, tuple):
+        sock, session_token = result
+    else:
+        sock, session_token = result, b""
+
     if sock is None:
         raise ConnectionError(f"TCP-Initialisierung mit {ip}:8802 fehlgeschlagen.")
 
@@ -35,7 +43,7 @@ def load_services(ip: str, timeout: float = 15.0) -> List[ServiceEntry]:
     )
     keepalive.start()
     try:
-        channels = fetch_channel_list(sock, lock, timeout=timeout)
+        channels = fetch_channel_list(sock, lock, session_token, timeout=timeout)
         services = channels_to_services(channels) if channels else []
     finally:
         stop.set()
@@ -51,4 +59,7 @@ def load_services(ip: str, timeout: float = 15.0) -> List[ServiceEntry]:
     return services
 
 
-__all__ = ["DEFAULT_IP", "load_services", "connect", "disconnect", "fetch_channel_list", "threading"]
+__all__ = [
+    "DEFAULT_IP", "load_services",
+    "connect", "disconnect", "fetch_channel_list", "threading",
+]
