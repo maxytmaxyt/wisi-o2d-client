@@ -11,6 +11,10 @@ from models import ServiceEntry, FALLBACK_SERVICE
 
 DEFAULT_IP = protocol.DEFAULT_IP
 
+# Modul-Level-Aliase damit Tests sie patchen können
+connect    = protocol.connect
+disconnect = protocol.disconnect
+
 
 def load_services(ip: str, timeout: float = 15.0) -> List[ServiceEntry]:
     """
@@ -18,7 +22,7 @@ def load_services(ip: str, timeout: float = 15.0) -> List[ServiceEntry]:
     und gibt eine Liste von ServiceEntry zurück.
     Wirft ConnectionError wenn kein Kanal gefunden wird.
     """
-    sock = protocol.connect(ip)
+    sock = connect(ip)
     if sock is None:
         raise ConnectionError(f"TCP-Initialisierung mit {ip}:8802 fehlgeschlagen.")
 
@@ -36,7 +40,7 @@ def load_services(ip: str, timeout: float = 15.0) -> List[ServiceEntry]:
     finally:
         stop.set()
         keepalive.join(timeout=4.0)
-        protocol.disconnect(sock)
+        disconnect(sock)
 
     if not services:
         raise ConnectionError(
@@ -47,4 +51,4 @@ def load_services(ip: str, timeout: float = 15.0) -> List[ServiceEntry]:
     return services
 
 
-__all__ = ["DEFAULT_IP", "load_services"]
+__all__ = ["DEFAULT_IP", "load_services", "connect", "disconnect", "fetch_channel_list", "threading"]
