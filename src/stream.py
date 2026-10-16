@@ -1,7 +1,6 @@
 """
-stream.py – Keep-Alive, Kanal-Prepare und MPEG-TS-Stream
-=========================================================
-_keepalive_worker  – Hintergrund-Thread für 0x16-Ping
+stream.py – Kanal-Prepare und MPEG-TS-Stream
+=============================================
 prepare_channel    – 0x03 → 0x32/0x33 → 0x02 (Signal prüfen)
 stream             – Tune + UDP-MPEG-TS-Stream
 
@@ -9,6 +8,8 @@ Fixes aus PROBLEME.md:
   Problem 1: on_dead-Event wenn tcp_sock nach Tune abbricht (erwartet)
   Problem 2: Speedtest-Response-Filter (48205 Byte) + Request-Response-Pull
   Problem 3: Re-Tune + Stream-Freigabe auf stream_ka_sock nach Verbindungsaufbau
+
+Keep-Alive-Logik ist in keepalive.py ausgelagert.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import time
 from typing import Optional
 
 import protocol
+from keepalive import _keepalive_worker
 from models import ServiceEntry
 
 log = logging.getLogger("wisi.stream")
@@ -31,36 +33,6 @@ SPEEDTEST_RESPONSE_SIZE: int = protocol.UDP_REQUEST_LEN + 77  # 48205
 
 SIGNAL_INTVL: float = protocol.SIGNAL_INTVL
 UDP_PULL_INTVL: float = 0.5
-
-
-# ---------------------------------------------------------------------------
-# Keep-Alive-Thread
-# ---------------------------------------------------------------------------
-def _keepalive_worker(
-    sock: socket.socket,
-    lock: threading.Lock,
-    stop: threading.Event,
-    on_dead: Optional[threading.Event] = None,
-) -> None:
-    """
-    Sendet alle KEEPALIVE_INTVL Sekunden einen 0x16-Ping.
-
-    `on_dead`: optionales Event das gesetzt wird wenn der Socket abbricht –
-    erlaubt dem Stream-Thread darauf zu reagieren (Problem 1/3).
-    Nach dem Tune schließt der Dongle die erste TCP-Verbindung (WinError 10053).
-    Das ist erwartet; wir loggen es nur als DEBUG.
-    """
-    cmd = protocol.cmd_16()
-    while not stop.wait(protocol.KEEPALIVE_INTVL):
-        try:
-            with lock:
-                sock.sendall(cmd)
-                protocol.recv_exactly(sock, 12 + protocol.USBS_LEN)
-        except OSError as e:
-            log.debug("Keep-Alive Socket gestorben (erwartet nach Tune): %s", e)
-            if on_dead is not None:
-                on_dead.set()
-            break
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +144,6 @@ def stream(
         log.info("0x17 confirm: 0x%02X", r[2] if len(r) > 2 else 0xFF)
 
         # Problem 3: Zweite TCP-Verbindung aufbauen.
-        # Der Dongle schließt tcp_sock nach dem Tune (Problem 1). Die neue
-        # Verbindung (stream_ka_sock) re-tuned, damit der Dongle sie als
-        # Stream-Owner erkennt und den UDP-Output weiterführt.
         result = protocol.connect(dongle_ip)
         if result is None:
             raise ConnectionError("Keep-Alive-Verbindung nach Tune fehlgeschlagen.")
@@ -209,11 +178,7 @@ def stream(
         t_start = time.monotonic()
         block_num = 0
         ts_bytes = 0
-        # Problem 2: Request-Response-Pull.
-        # pull_pending = True: Pull läuft, wir warten auf Antwort.
-        # Sobald ein TS-Block kommt, wird sofort der nächste Pull gesendet.
-        # Timer greift nur als Fallback wenn keine Daten kommen.
-        pull_pending = True          # Pull #1 wurde schon gesendet
+        pull_pending = True
         next_pull_deadline = t_start + UDP_PULL_INTVL
         last_packet_at = t_start
         next_timeout_warning = t_start + 5.0
@@ -226,7 +191,6 @@ def stream(
                     log.info("Dauer %.0f s erreicht.", duration_s)
                     break
 
-                # Pull-Fallback: senden wenn kein Pull aussteht ODER Timer abgelaufen.
                 if not pull_pending or now >= next_pull_deadline:
                     udp.sendto(
                         protocol.cmd_udp_ts_block(first=False),
@@ -248,11 +212,9 @@ def stream(
                         next_timeout_warning = now + 5.0
                     continue
 
-                # Bekannte Non-TS-Präfixe
                 if data[:4] == b"USBS" or data[:2] == b"\xf9\x0a":
                     continue
 
-                # Problem 2: Speedtest-Response explizit filtern (48205 Byte).
                 if len(data) == SPEEDTEST_RESPONSE_SIZE:
                     speedtest_count += 1
                     if speedtest_count == 1:
@@ -263,11 +225,9 @@ def stream(
                         )
                     else:
                         log.debug("Speedtest-Response #%d verworfen", speedtest_count)
-                    # Keinen sofortigen Re-Pull – Timer-Fallback übernimmt.
                     pull_pending = False
                     continue
 
-                # TS-Sync suchen
                 sync_offset = data.find(bytes([protocol.TS_SYNC]))
                 while sync_offset >= 0:
                     if (
@@ -304,7 +264,6 @@ def stream(
                 block_num += 1
                 ts_bytes += complete_len
 
-                # Problem 2: Sofort nächsten Pull nach erfolgreichem TS-Block senden.
                 udp.sendto(
                     protocol.cmd_udp_ts_block(first=False),
                     (dongle_ip, protocol.UDP_PORT),
