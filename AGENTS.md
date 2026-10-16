@@ -6,9 +6,13 @@ Dieses Repo enthält einen reverse-engineerten Python-Client für den **WISI OR 
 
 | Was | Wo |
 |---|---|
-| Aktiver Client | `src/wisi_client.py` (Hauptimplementierung) |
 | CLI-Einstieg | `src/wisi.py --help` |
-| Protokoll-Layer | `src/protocol.py` (USBC-Builder, Konstanten) |
+| Datenmodelle | `src/models.py` – Channel, ServiceEntry, FALLBACK_SERVICE |
+| Protokoll-Layer | `src/protocol.py` – USBC-Builder, Konstanten, TCP-Helfer, connect/disconnect |
+| Kanalliste | `src/channels.py` – fetch_channel_list, parse_chlist_xml |
+| Stream | `src/stream.py` – _keepalive_worker, prepare_channel, stream() |
+| Menü | `src/menu.py` – interaktives Konsolenmenü |
+| CLI-Main | `src/wisi_client.py` – main(), Re-Export DEFAULT_IP |
 | Legacy-Referenz | `archive/` (nicht anfassen) |
 | Forschungsstand | `research/README.md` ← zuerst lesen |
 | Neue Erkenntnisse (APK+Spec) | `research/neue_erkenntnisse.md` |
