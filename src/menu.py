@@ -14,8 +14,9 @@ from typing import List, Optional
 
 import protocol
 from channels import fetch_channel_list, channels_to_services
+from keepalive import _keepalive_worker
 from models import ServiceEntry, FALLBACK_SERVICE
-from stream import _keepalive_worker, prepare_channel, stream
+from stream import prepare_channel, stream
 
 log = logging.getLogger("wisi.menu")
 
