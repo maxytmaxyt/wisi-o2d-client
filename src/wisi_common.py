@@ -4,15 +4,12 @@ from __future__ import annotations
 import threading
 from typing import List
 
-from wisi_client import (
-    DEFAULT_IP,
-    ServiceEntry,
-    _keepalive_worker,
-    channels_to_services,
-    connect,
-    disconnect,
-    fetch_channel_list,
-)
+import protocol
+from channels import fetch_channel_list, channels_to_services
+from keepalive import _keepalive_worker
+from models import ServiceEntry, FALLBACK_SERVICE
+
+DEFAULT_IP = protocol.DEFAULT_IP
 
 
 def load_services(ip: str, timeout: float = 15.0) -> List[ServiceEntry]:
@@ -21,26 +18,25 @@ def load_services(ip: str, timeout: float = 15.0) -> List[ServiceEntry]:
     und gibt eine Liste von ServiceEntry zurück.
     Wirft ConnectionError wenn kein Kanal gefunden wird.
     """
-    result = connect(ip)
-    if result is None:
+    sock = protocol.connect(ip)
+    if sock is None:
         raise ConnectionError(f"TCP-Initialisierung mit {ip}:8802 fehlgeschlagen.")
-    control, session_token = result
 
     lock = threading.Lock()
     stop = threading.Event()
     keepalive = threading.Thread(
         target=_keepalive_worker,
-        args=(control, lock, stop, session_token),
+        args=(sock, lock, stop),
         daemon=True,
     )
     keepalive.start()
     try:
-        channels = fetch_channel_list(control, lock, session_token, timeout=timeout)
+        channels = fetch_channel_list(sock, lock, timeout=timeout)
         services = channels_to_services(channels) if channels else []
     finally:
         stop.set()
         keepalive.join(timeout=4.0)
-        disconnect(control)
+        protocol.disconnect(sock)
 
     if not services:
         raise ConnectionError(
