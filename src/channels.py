@@ -13,7 +13,7 @@ import logging
 import re
 import struct
 import threading
-from typing import List
+from typing import List, Optional
 
 import protocol
 from models import Channel, ServiceEntry, channel_to_service
@@ -75,6 +75,7 @@ def parse_chlist_xml(xml_bytes: bytes) -> List[Channel]:
 def fetch_channel_list(
     sock,
     lock: threading.Lock,
+    session_token: bytes = b"",
     timeout: float = 15.0,
 ) -> List[Channel]:
     """
@@ -82,6 +83,10 @@ def fetch_channel_list(
       0xF6/0x20  →  Länge der XML (8 Byte Antwort, [2:6] = uint32 BE)
       0xF6/0x21  →  XML-Daten (<ch_List>…</ch_List>)
       0xF6/0x22  →  Empfangsquittung (optional, aber Dongle trennt sonst)
+
+    session_token: wird aktuell nicht im Protokoll benötigt, aber von
+                   wisi_common.load_services weitergereicht (für künftige Nutzung
+                   und Testkompatibilität).
     """
     # Schritt 1: Länge
     with lock:
